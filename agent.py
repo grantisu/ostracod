@@ -513,8 +513,6 @@ class Agent:
                 if cmd == "/messages"[: len(cmd)]:
                     for msg in self.message_history:
                         self.console.output(str(msg))
-                elif cmd == "/empty"[: len(cmd)]:
-                    self.streaming_completion(None)
                 elif cmd == "/temperature"[: len(cmd)]:
                     try:
                         self.temperature = float(args[0])
