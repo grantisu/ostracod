@@ -1,0 +1,9 @@
+services:
+  agent:
+    build: .
+    command: python agent.py
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./workingdir:/agent/workingdir
+      - ./.agent_history:/agent/.agent_history
