@@ -675,8 +675,14 @@ class ToolAgent(Agent):
 
     def run_shell_tool(
         self, command: str, stdin: str = "", env: dict[str, str] | None = None
-    ) -> dict[str, str | int | None]:
-        return self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
+    ) -> dict[str, str | int | bool | None]:
+        result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
+        for s in ("stdout", "stderr"):
+            r = str(result.get(s, ""))
+            if len(r) > 4000:
+                result[s] = f"{r[:4000]}[TRUNCATED]"
+                result[f"{s}_truncated"] = True
+        return result
 
     @property
     def shell_tool(self) -> ToolDef:
