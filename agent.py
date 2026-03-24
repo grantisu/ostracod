@@ -4,7 +4,6 @@ import os
 import re
 import readline
 import requests
-import shlex
 import subprocess
 import sys
 
@@ -165,7 +164,10 @@ class StreamingResponse:
         self.response: CompletionResponse | None = None
 
     def __iter__(self) -> Iterator[tuple[Any, Any, Any, Any]]:
-        self.response = yield from self._stream
+        try:
+            self.response = yield from self._stream
+        except ValueError as e:
+            raise AgentError(e)
 
 
 class Client:
@@ -182,7 +184,8 @@ class Client:
         }
 
     def basic_completion(self, data: CompletionRequest) -> CompletionResponse:
-        assert not data.stream
+        if data.stream:
+            raise ValueError("Streaming request")
         resp = self.session.post(
             self.base_uri + "/chat/completions",
             data=data.model_dump_json(exclude_unset=True),
@@ -198,7 +201,9 @@ class Client:
             data=data.model_dump_json(exclude_unset=True),
             stream=True,
         )
-        assert resp.headers["Content-Type"] == "text/event-stream"
+        if resp.headers["Content-Type"] != "text/event-stream":
+            breakpoint()
+            raise AgentError(f"Bad response: {resp}")
 
         def data_chunker() -> Iterator[dict[str, Any]]:
             for line in resp.iter_lines(chunk_size=None, delimiter=b"\n\n"):
@@ -208,7 +213,7 @@ class Client:
                     return
                 yield json.loads(line[6:])
 
-            raise ValueError("Missing DONE line")
+            raise AgentError("Missing DONE line")
 
         reason_frag = []
         content_frag = []
@@ -220,7 +225,7 @@ class Client:
             try:
                 co = chunk["choices"][0]
             except KeyError:
-                raise ValueError("Missing choices in {chunk}")
+                raise AgentError(f"Missing choices in {chunk}")
 
             finish_reason = co.get("finish_reason")
             d = co["delta"]
@@ -269,7 +274,8 @@ class Client:
         )
 
     def streaming_completion(self, data: CompletionRequest) -> StreamingResponse:
-        assert data.stream
+        if not data.stream:
+            raise ValueError("Not a streaming request")
         return StreamingResponse(self._streaming_completion(data))
 
 
@@ -320,10 +326,12 @@ class Console:
 
             atexit.register(rlh_save, rlh_len)
 
-    def reset(self) -> "Console":
+    def reset(self, sep: bool = True) -> "Console":
         self.stdout.write(self.RESET)
         self.in_reasoning = False
         self.in_tooling = False
+        if sep:
+            self.sep()
         return self
 
     def dim(self, text: str = "") -> "Console":
@@ -367,7 +375,7 @@ class Console:
             self.output(str(tooling))
         if content:
             if self.in_reasoning or self.in_tooling:
-                self.reset().sep()
+                self.reset()
             self.output(content)
         self._nfrag += 1
         if (self._nfrag & 3) == 0:
@@ -416,11 +424,14 @@ class Agent:
     def model_ctx(self) -> int:
         return self.model_data.meta.get("n_ctx_train", 0)
 
+    def system_template_args(self) -> dict[str, str]:
+        return {
+            "now": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+        }
+
     @property
     def system_message(self) -> str:
-        return self.system_template.substitute(
-            now=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
-        )
+        return self.system_template.substitute(self.system_template_args())
 
     @property
     def chat_template_kwargs(self) -> ChatTemplateKwargs:
@@ -457,10 +468,13 @@ class Agent:
         return final_result
 
     def subshell_helper(
-        self, argv: list[str], timeout: int = 30, **kwargs
+        self,
+        argv: list[str],
+        timeout: int = 30,
+        cwd: str | Path | None = None,
     ) -> dict[str, str | int | None]:
         try:
-            r = subprocess.run(argv, capture_output=True, timeout=timeout, **kwargs)
+            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired as e:
             return {
                 "returncode": 1,
@@ -501,7 +515,7 @@ class Agent:
                 elif inp[:6] == "/loop ":
                     self.console.bright("Entering loop").reset()
                     loop_prompt = inp[6:]
-                    loop_prompt += f'\nIf the task is complete, then say "done" with no other preface or formatting.'
+                    loop_prompt += '\nIf the task is complete, then say "done" with no other preface or formatting.'
                 else:
                     self.console.output(f"Unknown command: {inp}")
             elif inp[:1] == "%":
@@ -509,7 +523,16 @@ class Agent:
                 self.console.output(str(r["stderr"]))
                 self.console.output(str(r["stdout"]))
             else:
-                last_output = self.streaming_completion(inp)
+                # If we're in a loop, retry things a few times before giving up
+                for i in range(3):
+                    try:
+                        last_output = self.streaming_completion(inp)
+                    except AgentError:
+                        if not loop_prompt:
+                            raise
+                    else:
+                        break
+
             self.console.sep()
 
 
@@ -542,27 +565,31 @@ class ToolAgent(Agent):
             system_message=system_message,
         )
 
-        self.safe_shell = True
-        if self.bin_dir in [Path("/bin"), Path("/usr/bin")]:
-            self.console.bright("DISABLING SHELL SAFETY").reset().sep()
-            self.safe_shell = False
-
         if tools is None:
             tools = self.default_tools
 
         self.tools = {t.meta.name: t for t in tools}
-        # TODO: figure out better abstraction for open tool
+        # TODO: figure out better abstraction?
         self.message_queue: list[MsgItem] = []
-        self.open_fh: IO[str] | None = None
+
+        if "shell" in self.tools:
+            self.console.bright(
+                "WARNING: shell runs arbitrary commands; make sure you want this!"
+            ).reset()
 
         for prefix in ("bin", "working", "config"):
             path = getattr(self, f"{prefix}_dir")
             if not (path.exists() and path.is_dir()):
                 raise AgentError(f"Bad {prefix} directory given: {path}")
 
+    def system_template_args(self) -> dict[str, str]:
+        targs = super().system_template_args()
+        targs["working_dir"] = str(self.working_dir)
+        return targs
+
     @property
     def default_tools(self) -> list[ToolDef]:
-        return [self.open_tool, self.shell_tool]
+        return [self.read_tool, self.write_tool, self.shell_tool, self.patch_tool]
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
@@ -583,51 +610,42 @@ class ToolAgent(Agent):
                 model=self.model_name,
                 messages=msg_items,
                 chat_template_kwargs=self.chat_template_kwargs,
+                tool_choice=ToolChoice("none"),
                 stream=True,
             )
-            if tool_items and not (self.open_fh and tool_rounds < max_rounds):
+            if tool_items and tool_rounds < max_rounds:
                 data.tools = tool_items
+                data.tool_choice = ToolChoice("auto")
 
+            last_error = None
             for retry in range(3):
+                if retry > 0:
+                    self.console.bright("RETRYING").reset()
                 try:
                     completion = self.client.streaming_completion(data)
                     for frag in completion:
                         self.console.emit_fragment(*frag)
-                except ValueError:
-                    self.console.bright("RETRYING FAILED COMPLETION")
+                except AgentError as e:
+                    self.console.bright(f"FAILED COMPLETION:\n{e}").reset()
+                    last_error = e
                     pass
                 else:
+                    last_error = None
                     break
             self.console.sep()
+
+            if last_error is not None:
+                raise last_error
 
             assert completion.response is not None
             resp = completion.response.choices[0]
             msg_items += [resp.message]
-            content = resp.message.content
-            # Hack in open tool functionality
-            if content and self.open_fh:
-                # Many models can't _not_ put markdown fences around "raw" text:
-                if len(content) > 8 and content[:3] == "```" and content[-3:] == "```":
-                    content = content[content.index("\n") + 1 : -3]
-                self.open_fh.write(content)
-                self.open_fh.close()
-                self.open_fh = None
-                extra_tool_result = (
-                    f'{{"error": null, "characters_written":{len(content)}}}'
-                )
-                msg_items += [
-                    MsgItem(
-                        role="tool",
-                        content=extra_tool_result,
-                    )
-                ]
-                self.console.dim(extra_tool_result).reset().sep()
             if resp.finish_reason == "tool_calls":
                 if max_rounds <= tool_rounds:
                     raise AgentError("Too many tool calls")
                 for t in resp.message.tool_calls or []:
                     r = json.dumps(self.call_tool(t))
-                    self.console.dim(r).reset().sep()
+                    self.console.dim(r).reset()
                     msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
                     if self.message_queue:
                         msg_items.extend(self.message_queue)
@@ -637,6 +655,7 @@ class ToolAgent(Agent):
                 final_result = resp.message.content
                 break
         self.message_history += [MsgItem(role="assistant", content=final_result)]
+        # self.message_history = msg_items[1:]
         assert final_result is not None
         return final_result
 
@@ -659,60 +678,14 @@ class ToolAgent(Agent):
     def run_shell_tool(
         self, command: str, stdin: str = ""
     ) -> dict[str, str | int | None]:
-        s = shlex.shlex(command, posix=True, punctuation_chars=True)
-        s.whitespace_split = True
-        try:
-            arg_list = list(s)
-        except Exception as e:
-            return {
-                "returncode": -1,
-                "stdout": "",
-                "stderr": f"Unparsable input: {e}",
-            }
-
-        if not self.safe_shell:
-            return self.subshell_helper(
-                ["/bin/sh", "-c", command], cwd=self.working_dir
-            )
-
-        # NB: we rely on restricted PATH and shell for checks but also
-        # want to have our own checks that look/behave similarly
-        def restricted(reason: str) -> dict[str, str | int | None]:
-            return {
-                "returncode": 1,
-                "stdout": "",
-                "stderr": f"sh: {reason}: restricted",
-            }
-
-        for a in arg_list:
-            m = re.match(r"^([<>]+|PATH=|\.\.|(?<!&)&(?!&))", a)
-            if m:
-                return restricted(m.group(1))
-
-        if re.match(r"git.config\b.*--global", command):
-            return restricted("git config --global")
-
-        m = re.match(r"\bfind\b.*\b-(exec|execdir|ok|okdir)\b", command)
-        if m:
-            return restricted(f"find -{m.group(1)}")
-
-        if re.match(r"\bdate\b[^|;&]*\b(-s|--set|(?<=[ '\"])[0-9]{4,8})\b", command):
-            return restricted("date --set")
-
-        # TODO: re-allow redirects somehow?
-        return self.subshell_helper(
-            ["/bin/sh", "-r", "-c", command], cwd=self.working_dir, env=self.tool_env
-        )
+        return self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir)
 
     @property
     def shell_tool(self) -> ToolDef:
-        if not self.safe_shell:
-            desc = "Execute commands in a POSIX shell."
-        else:
-            desc = "Execute commands in a restricted POSIX shell. "
-            'Note that many "dangerous" things (like running a new shell '
-            "or changing directories) are not allowed.\n"
-            f"PATH contains: {', '.join(f.name for f in self.bin_dir.iterdir())}"
+        desc = "Execute commands in a POSIX shell.\n"
+        "Try to avoid using this to read or write entire files; "
+        "use the `read` or `write` tools instead.\n"
+        "Each call of this tool will spawn a new subshell."
 
         return ToolDef(
             func=self.__class__.run_shell_tool,
@@ -727,7 +700,7 @@ class ToolAgent(Agent):
                         ),
                         "stdin": ToolProp(
                             "string",
-                            "A string to serve as standard input for the command.",
+                            "A string to use as standard input for the command.",
                         ),
                     },
                     required=["command"],
@@ -735,7 +708,7 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_open_tool(self, path: str, mode: str) -> dict[str, str | int | None]:
+    def run_read_tool(self, path: str) -> dict[str, str | int | None]:
         rpath = (self.working_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
@@ -745,44 +718,17 @@ class ToolAgent(Agent):
                 "status": None,
             }
 
-        if mode not in ("r", "w", "a"):
-            return {
-                "error": f"Unsupported mode: {mode}",
-                "status": None,
-            }
-
         error = None
-        status = "No file open."
-        if mode == "r":
-            content = ""
-            try:
-                with rpath.open("r") as fh:
-                    content = fh.read()
-            except (IOError, ValueError) as e:
-                error = f"Couldn't read: {e}"
-            else:
-                status = f"Contents of {path} will appear in next message."
-                self.message_queue.append(MsgItem(role="user", content=content))
-        elif mode in ("w", "a"):
-            if self.open_fh:
-                error = "Already have an open file"
-                status = "File is open."
-            else:
-                try:
-                    self.open_fh = rpath.open(mode)
-                except (IOError, ValueError) as e:
-                    error = f"Couldn't open for write: {e}"
-                else:
-                    if mode == "w":
-                        status = f"{path} is empty and is ready to be written to."
-                    elif mode == "a":
-                        status = f"{path} is ready to be appended to."
-
-            if self.open_fh:
-                status += (
-                    "\nTHE NEXT MESSAGE FROM THE ASSISTANT WILL BE WRITTEN DIRECTLY TO THE FILE."
-                    "\nPRODUCE FILE CONTENTS DIRECTLY, DO NOT USE EXTRA FORMATTING, ESCAPING, OR TOOL CALLS!"
-                )
+        status = "No file read."
+        content = ""
+        try:
+            with rpath.open("r") as fh:
+                content = fh.read()
+        except (IOError, ValueError) as e:
+            error = f"Couldn't read: {e}"
+        else:
+            status = f"Contents of {path} will appear in next message."
+            self.message_queue.append(MsgItem(role="user", content=content))
 
         return {
             "error": error,
@@ -790,28 +736,323 @@ class ToolAgent(Agent):
         }
 
     @property
-    def open_tool(self) -> ToolDef:
+    def read_tool(self) -> ToolDef:
         return ToolDef(
-            func=self.__class__.run_open_tool,
+            func=lambda s, path: self.__class__.run_read_tool(s, path),
             meta=ToolFunc(
-                name="open",
-                description="Open `path` as a text file for reading, writing or appending.\n"
-                'If mode is "r", then the next user message will be the file contents.\n'
-                'If mode is "w", then the next assistant message will replace the file contents.\n'
-                'If mode is "a", then the next assistant message will be added to the end of the file.\n'
-                "An open file will be automatically closed after the first read or write; "
-                "multiple writes will require multiple opens.\n"
-                "Note that this tool uses message contents, not extra tool calls.\n"
-                "Avoid markdown formatting when not writing to a markdown file.",
+                name="read",
+                description="Read the contents of the file at `path` into the next user message.",
                 parameters=ToolParams(
                     properties={
-                        "path": ToolProp("string", "The file to open."),
-                        "mode": ToolProp(
-                            "string",
-                            "The operation to perform on the file: 'r' for read, 'w' for write', or 'a' for append.",
+                        "path": ToolProp("string", "The file to read."),
+                    },
+                    required=["path"],
+                ),
+            ),
+        )
+
+    def run_write_tool(self, path: str, content: str) -> dict[str, str | int | None]:
+        rpath = (self.working_dir / path).resolve()
+        try:
+            rpath.relative_to(self.working_dir)
+        except ValueError:
+            return {
+                "error": "Path not in working directory",
+                "bytes_written": 0,
+            }
+
+        error = None
+        bytes_written = 0
+        try:
+            with rpath.open("w") as fh:
+                bytes_written = fh.write(content)
+        except (IOError, ValueError) as e:
+            error = f"Couldn't write to {path}: {e}"
+
+        return {
+            "error": error,
+            "bytes_written": bytes_written,
+        }
+
+    @property
+    def write_tool(self) -> ToolDef:
+        return ToolDef(
+            func=self.__class__.run_write_tool,
+            meta=ToolFunc(
+                name="write",
+                description="Write `content` into the file at `path`, "
+                "replacing anything that was already there.",
+                parameters=ToolParams(
+                    properties={
+                        "path": ToolProp("string", "The file to write."),
+                        "content": ToolProp(
+                            "string", "The data to write into the file."
                         ),
                     },
-                    required=["path", "mode"],
+                    required=["path", "content"],
+                ),
+            ),
+        )
+
+    # TODO: clean this mess up
+    @staticmethod
+    def updates_from_patch(
+        working_dir: Path, patch: str
+    ) -> dict[tuple[Path, Path], str]:
+        _patch_lines = iter(patch.splitlines(keepends=True))
+
+        fake_plines: list[str] = []
+
+        def next_pline() -> str:
+            if fake_plines:
+                return fake_plines.pop(0)
+            real_pline = next(_patch_lines, "")
+            if real_pline[:1] == "*":
+                # Hack in pseudo-patch support
+                rpl = real_pline.lower()
+                if rpl.startswith("*** update file: "):
+                    _, spfn = real_pline.split(":", 1)
+                    fake_plines.append(f"+++{spfn}")
+                    return f"---{spfn}"
+
+                if rpl.startswith("*** delete file: "):
+                    _, spfn = real_pline.split(":", 1)
+                    from_path = (working_dir / spfn[1:-1]).resolve()
+                    if not from_path.exists():
+                        raise ValueError(f"Missing file: {from_path}")
+
+                    fake_plines.append("+++ /dev/null\n")
+                    fake_plines.extend(from_path.read_text().splitlines(keepends=True))
+                    return f"---{spfn}"
+
+                if rpl.startswith("*** end patch"):
+                    return ""
+
+            return real_pline
+
+        patch_line = next_pline()
+        updates: dict[tuple[Path, Path], str] = {}
+        while patch_line:
+            while patch_line:
+                patch_prefix = patch_line[:2]
+                if patch_prefix == "--":
+                    # Found a file
+                    break
+                if patch_prefix == "@@":
+                    raise ValueError(f"Hunk header appears before file name: {patch_line!r}")
+                if patch_prefix == "++":
+                    raise ValueError(f"Bad file name ordering: {patch_line!r}")
+                patch_line = next_pline()
+
+            # File section
+            if patch_line[:4] != "--- ":
+                raise ValueError(f"Bad file header: {patch_line!r}")
+            from_file = patch_line[4:-1]
+            if from_file[0] in " \t\n":
+                raise ValueError(f"Bad file name: {from_file!r}")
+            if from_file[0] == '"':
+                from_file = json.loads(from_file)
+
+            patch_line = next_pline()
+            if patch_line[:4] != "+++ ":
+                raise ValueError(f"Missing file header; got: {patch_line!r}")
+            to_file = patch_line[4:-1]
+            if to_file[0] in " \t\n":
+                raise ValueError(f"Bad file name: {to_file!r}")
+            if to_file[0] == '"':
+                to_file = json.loads(to_file)
+
+            # TODO: more careful checks?
+            if from_file[:2] == "a/":
+                from_file = from_file[2:]
+            if to_file[:2] == "b/":
+                to_file = to_file[2:]
+
+            from_path = (working_dir / from_file).resolve()
+            if not from_path.exists():
+                raise ValueError(f"File not found: {from_file!r}")
+
+            to_path = (working_dir / to_file).resolve()
+
+            def fline_gen() -> Generator[str, None, None]:
+                with from_path.open("r") as from_fh:
+                    yield from from_fh.readlines()
+
+            _from_gen = fline_gen()
+            from_lines: list[str] = []
+            behind = 0
+
+            def next_fline() -> str:
+                nonlocal behind
+                if behind:
+                    line = from_lines[-behind]
+                    behind -= 1
+                    return line
+
+                line = next(_from_gen, "")
+                if line:
+                    from_lines.append(line)
+                return line
+
+            to_lines: list[str] = []
+
+            patch_line = next_pline()
+            from_line = next_fline()
+            while patch_line:
+                # Hunk header
+                m = re.match(
+                    r"^@@(?: -?(\d+)(?:,(\d+))? \+?(\d+)(?:,(\d+))?)?", patch_line
+                )
+                if m is None:
+                    if patch_line[:4] == "--- ":
+                        break
+                    raise ValueError(f"Missing hunk header; got: {patch_line!r}")
+                from_start, from_count, to_start, to_count = (
+                    int(g) if g else None for g in m.groups()
+                )
+                if from_start is None and from_file == "/dev/null":
+                    from_start = from_count = 0
+
+                patch_line = next_pline()
+
+                if from_start is not None:
+                    if not from_start and from_lines:
+                        raise ValueError(
+                            "Hunk header says from file should be empty, but it's not"
+                        )
+                    if from_start < len(from_lines):
+                        # Overlapping hunks; reset to/from
+                        behind = len(from_lines) - from_start + 1
+                        to_lines = to_lines[:behind]
+                        from_line = next_fline()
+                    else:
+                        # Skip to location
+                        while len(from_lines) != from_start:
+                            to_lines.append(next_fline())
+                        if to_start:
+                            pass  # TODO: check location?
+                else:
+                    # Search for hunk
+                    if patch_line[0] not in [" ", "-"]:
+                        raise ValueError(
+                            "Need from context to search for unanchored hunks"
+                        )
+                    while True:
+                        if from_line == patch_line[1:]:
+                            break
+                        to_lines.append(from_line)
+                        from_line = next_fline()
+                        if not from_line:
+                            raise ValueError(f"No match in file for {patch_line!r}")
+
+                # Apply hunk
+                while patch_line:
+                    if from_count is not None and to_count is not None:
+                        assert from_start is not None and to_start is not None
+                        if len(from_lines) == (from_start + from_count - 1) and len(
+                            to_lines
+                        ) == (to_start + to_count - 1):
+                            break
+
+                    line_prefix, line_content = patch_line[:1], patch_line[1:]
+                    match line_prefix:
+                        case " ":
+                            if line_content != from_line:
+                                raise ValueError(f"Context mismatch; expected {line_content!r} but got {from_line!r}")
+                            to_lines.append(line_content)
+                            patch_line = next_pline()
+                            from_line = next_fline()
+                        case "-":
+                            if from_count is None and patch_line[:4] == "--- ":
+                                break  # Assume new file
+                            if line_content != from_line:
+                                raise ValueError(
+                                    f"Line deletion mismatch: {line_content!r} != {from_line!r}"
+                                )
+                            patch_line = next_pline()
+                            from_line = next_fline()
+                        case "+":
+                            to_lines.append(line_content)
+                            patch_line = next_pline()
+                        case "@":
+                            # TODO
+                            # if (...):
+                            #     raise ValueError("Bad line counts")
+                            break
+                        case "":
+                            break
+                        case _:
+                            raise ValueError(f"Bad line mid-hunk: {patch_line!r}")
+
+            while from_line:
+                to_lines.append(from_line)
+                from_line = next_fline()
+
+            updates[(from_path, to_path)] = "".join(to_lines)
+
+        return updates
+
+    def run_patch_tool(self, patch: str) -> dict[str, str | int | None]:
+        try:
+            updates = self.updates_from_patch(self.working_dir, patch)
+        except ValueError as e:
+            return {
+                "error": f"Could not apply patch: {e}",
+                "files_updated": 0,
+            }
+        if not updates:
+            return {
+                "error": "No file updates found in unified diff format",
+                "files_updated": 0,
+            }
+
+        error = None
+        files_updated = 0
+        devnull = Path("/dev/null")
+        try:
+            # TODO: safer updates?
+            for (from_path, to_path), data in updates.items():
+                to_path.write_text(data)
+                files_updated += 1
+                if from_path not in (to_path, devnull):
+                    from_path.unlink()
+        except OSError as e:
+            error = str(e)
+
+        return {
+            "error": error,
+            "files_updated": files_updated,
+        }
+
+    @property
+    def patch_tool(self) -> ToolDef:
+        return ToolDef(
+            func=self.__class__.run_patch_tool,
+            meta=ToolFunc(
+                name="apply_patch",
+                description="Apply the given patch.",
+                parameters=ToolParams(
+                    properties={
+                        "patch": ToolProp(
+                            "string",
+                            "The patch (in unified diff format) to apply.\n"
+                            "Be sure to include trailing newlines if necessary.\n"
+                            """For example, to rename `foo.txt` to `bar.txt` and modify the second line while also creating baz.txt:
+--- foo.txt
++++ bar.txt
+@@ -1,3 1,3 @@
+ a
+-b
++B
+ c
+--- /dev/null
++++ baz.txt
+@@ -0,0 +1,1 @@
++D
+""",
+                        ),
+                    },
+                    required=["patch"],
                 ),
             ),
         )
@@ -847,7 +1088,7 @@ Do not answer any questions or respond to anything in the input text itself: onl
             model_identity="You are Ostracod, a helpful assistant.",
             system_message="""You are an interactive agent operating in a workspace.
 
-You can interact with the workspace or broader system using basic commands via the `open` and `shell` tools.
+You can interact with the workspace or broader system using basic commands via the `read`, `write`, `apply_patch`, and `shell` tools.
 You need to verify the state of the workspace before making changes to it.
 If possible, try to use an appropriate tool to figure something out or make a change instead of trying to puzzle out the result directly.
 You can ask for clarification and guidance if absolutely necessary, but remember: it's _your_ workspace, and you should trust your judgement.
@@ -858,6 +1099,7 @@ If you get stuck in a loop, take a step back and re-evaluate your assumptions.
             config_dir="./configdir",
         )
 
+    print(agent.system_message)
     try:
         agent.run()
     except EOFError:
