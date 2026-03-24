@@ -510,7 +510,7 @@ class Agent:
             if inp[:1] == "/":
                 # Driver commands
                 cmd, *args = inp.split()
-                if cmd == "/history"[: len(cmd)]:
+                if cmd == "/messages"[: len(cmd)]:
                     for msg in self.message_history:
                         self.console.output(str(msg))
                 elif cmd == "/empty"[: len(cmd)]:
