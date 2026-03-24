@@ -51,11 +51,15 @@ class PropType(str, Enum):
     null = "null"
 
 
-class PropT(ModelT):
+class ToolProp(ModelT):
     type: PropType
+    description: str | None = None
 
-    def __init__(self, t: str):
-        super().__init__(type=t)
+    def __init__(self, t: str, description: str = ''):
+        kwargs = {'type': t}
+        if description:
+            kwargs['description'] = description
+        super().__init__(**kwargs)
 
 
 class FinishReason(str, Enum):
@@ -71,7 +75,7 @@ class ToolChoice(str, Enum):
 
 class ToolParams(ModelT):
     type: str = "object"
-    properties: dict[str, PropT] | None = None
+    properties: dict[str, ToolProp] | None = None
     required: list[str] | None = None
 
 
@@ -240,7 +244,10 @@ class Client:
         try:
             w(GRAY)
             for chunk in data_chunker():
-                co = chunk["choices"][0]
+                try:
+                    co = chunk["choices"][0]
+                except:
+                    breakpoint()
                 finish_reason = co.get("finish_reason")
                 d = co["delta"]
                 if "role" in d:
@@ -310,7 +317,6 @@ class Agent:
         working_dir: Path | str = "./workingdir",
         bin_dir: Path | str = "./bin",
         config_dir: Path | str = "./configdir",
-        stdout: IO[str] = sys.stdout,
     ):
         self.config_dir = Path(config_dir).resolve(True)
         self.working_dir = Path(working_dir).resolve(True)
@@ -344,6 +350,9 @@ class Agent:
         self.tools = {t.meta.name: t for t in tools}
         self.message_history: list[MsgItem] = []
         self.stdout = stdout
+        # TODO: figure out better abstraction for open tool
+        self.message_queue: list[MsgItem] = []
+        self.open_fh: io.IOBase | None = None
 
         for prefix in ("bin", "working", "config"):
             path = getattr(self, f"{prefix}_dir")
@@ -374,7 +383,8 @@ class Agent:
 
     @property
     def default_tools(self) -> list[ToolDef]:
-        return [self.shell_tool, self.write_tool]
+        # return [self.shell_tool, self.write_tool]
+        return [self.open_tool, self.shell_tool]
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
@@ -406,9 +416,9 @@ class Agent:
             data = CompletionRequest(
                 model=self.model_name,
                 messages=msg_items,
-                tools=tool_items,
+                tools=tool_items if not self.open_fh else [],
                 tool_choice=(
-                    ToolChoice("auto") if tool_rounds < max_rounds else ToolChoice("none")
+                    ToolChoice("auto") if not self.open_fh or tool_rounds < max_rounds else ToolChoice("none")
                 ),
                 chat_template_kwargs=self.chat_template_kwargs,
                 stream=True,
@@ -416,6 +426,17 @@ class Agent:
             completion = self.client.single_completion(data, stdout=self.stdout)
             resp = completion.choices[0]
             msg_items += [resp.message]
+            content = resp.message.content
+            if content and self.open_fh:
+                # Hack in open tool functionality
+                if len(content) > 8 and content[:3] == '```' and content[-3:] == '```':
+                    content = content[content.index('\n')+1:-3]
+                self.open_fh.write(content)
+                self.open_fh.close()
+                self.open_fh = None
+                msg_items += [MsgItem(role="tool",
+                    content=f'{{"error": null, "characters_written":{len(content)}}}')]
+                self.stdout.write(f"{GRAY}{msg_items[-1].content}{RESET}\n")
             # print(msg_items[-1])
             # print(resp)
             if resp.finish_reason == "tool_calls":
@@ -425,6 +446,9 @@ class Agent:
                     r = json.dumps(self.call_tool(t))
                     self.stdout.write(f"{GRAY}{r}{RESET}\n")
                     msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
+                    if self.message_queue:
+                        msg_items.extend(self.message_queue)
+                        self.message_queue = []
                 tool_rounds += 1
             elif resp.finish_reason == "stop":
                 final_result = resp.message.content
@@ -432,7 +456,7 @@ class Agent:
         self.message_history += [
             MsgItem(role="assistant", content=final_result)
         ]
-        return final_result or "{ERR: no agent output}"
+        return final_result or "[ERR: no agent output]"
 
     @property
     def tool_env(self) -> dict[str, str]:
@@ -446,8 +470,8 @@ class Agent:
                 env[k] = v
         return env
 
-    def run_shell_tool(self, argv: str, stdin: str = '') -> dict[str, str | int | None]:
-        s = shlex.shlex(argv, posix=True, punctuation_chars=True)
+    def run_shell_tool(self, command: str, stdin: str = '') -> dict[str, str | int | None]:
+        s = shlex.shlex(command, posix=True, punctuation_chars=True)
         s.whitespace_split = True
         try:
             arg_list = list(s)
@@ -460,10 +484,10 @@ class Agent:
 
         if not self.safe_shell:
             r = subprocess.run(
-                ["/bin/sh", "-c", argv],
+                ["/bin/sh", "-c", command],
                 capture_output=True,
                 cwd=self.working_dir,
-                timeout=300,
+                timeout=30,
             )
             return {
                 "returncode": r.returncode,
@@ -485,19 +509,19 @@ class Agent:
             if m:
                 return restricted(m.group(1))
 
-        if re.match(r"git.config\b.*--global", argv):
+        if re.match(r"git.config\b.*--global", command):
             return restricted("git config --global")
 
-        m = re.match(r"\bfind\b.*\b-(exec|execdir|ok|okdir)\b", argv)
+        m = re.match(r"\bfind\b.*\b-(exec|execdir|ok|okdir)\b", command)
         if m:
             return restricted(f"find -{m.group(1)}")
 
-        if re.match(r"\bdate\b[^|;&]*\b(-s|--set|(?<=[ '\"])[0-9]{4,8})\b", argv):
+        if re.match(r"\bdate\b[^|;&]*\b(-s|--set|(?<=[ '\"])[0-9]{4,8})\b", command):
             return restricted(f"date --set")
 
         # TODO: re-allow redirects?
         r = subprocess.run(
-            ["/bin/sh", "-r", "-c", argv],
+            ["/bin/sh", "-r", "-c", command],
             input=stdin,
             capture_output=True,
             cwd=self.working_dir,
@@ -518,7 +542,7 @@ class Agent:
             desc = f"Execute commands in a restricted POSIX shell. "
             'Note that many "dangerous" things (like running a new shell '
             "or changing directories) are not allowed.\n"
-            f"PATH contains: {', '.join(f.name for f in self.bin_dir.iterdir())}",
+            f"PATH contains: {', '.join(f.name for f in self.bin_dir.iterdir())}"
 
         return ToolDef(
             func=self.__class__.run_shell_tool,
@@ -526,56 +550,85 @@ class Agent:
                 name="shell",
                 description=desc,
                 parameters=ToolParams(
-                    properties={"argv": PropT("string"), "stdin": PropT("string")},
-                    required=["argv"],
+                    properties={
+                        "command": ToolProp("string", "The command string to pass to the shell. Compound commands are allowed, e.g. \"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\""),
+                        "stdin": ToolProp("string", "A string to serve as standard input for the command.")},
+                    required=["command"],
                 ),
             ),
         )
 
-    def run_write_tool(self, path: str, content: str) -> dict[str, str | int | None]:
+    def run_open_tool(self, path: str, mode: str) -> dict[str, str | int | None]:
         rpath = (self.working_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
             return {
                 "error": "Path not in working directory",
-                "bytes_written": 0,
+                "status": None,
             }
 
-        if "/.git/" in str(rpath):
+        if mode not in ("r", "w", "a"):
             return {
-                "error": "Can't write to files in git repository directly",
-                "bytes_written": 0,
+                "error": f"Unsupported mode: {mode}",
+                "status": None,
             }
 
         error = None
-        bytes_written = 0
-        try:
-            with rpath.open("w") as fh:
-                bytes_written = fh.write(content)
-        except IOError as e:
-            error = f"Couldn't write: {e}"
+        status = "No file open."
+        if mode == "r":
+            content = ""
+            try:
+                with rpath.open("r") as fh:
+                    content = fh.read()
+            except (IOError, ValueError) as e:
+                error = f"Couldn't read: {e}"
+            else:
+                status = f"Contents of {path} will appear in next message."
+                self.message_queue.append(MsgItem(role="user", content=content))
+        elif mode in ("w", "a"):
+            if self.open_fh:
+                error = "Already have an open file"
+                status = "File is open."
+            else:
+                try:
+                    self.open_fh = rpath.open(mode)
+                except (IOError, ValueError) as e:
+                    error = f"Couldn't open for write: {e}"
+                else:
+                    if mode == "w":
+                        status = f"{path} is empty and is ready to be written to."
+                    elif mode == "a":
+                        status = f"{path} is ready to be appended to."
+
+            if self.open_fh:
+                status += f"\nTHE NEXT MESSAGE FROM THE ASSISTANT WILL BE WRITTEN DIRECTLY TO THE FILE.\nPRODUCE FILE CONTENTS DIRECTLY, DO NOT USE EXTRA FORMATTING, ESCAPING, OR TOOL CALLS!"
 
         return {
             "error": error,
-            "bytes_written": bytes_written,
+            "status": status,
         }
 
     @property
-    def write_tool(self) -> ToolDef:
+    def open_tool(self) -> ToolDef:
         return ToolDef(
-            func=self.__class__.run_write_tool,
+            func=self.__class__.run_open_tool,
             meta=ToolFunc(
-                name="write",
-                description="Write `content` to the file at `path`, "
-                "replacing any existing file contents. Be careful to "
-                "not double-escape characters.",
+                name="open",
+                description='Open `path` as a text file for reading, writing or appending.\n'
+                'If mode is "r", then the next user message will be the file contents.\n'
+                'If mode is "w", then the next assistant message will replace the file contents.\n'
+                'If mode is "a", then the next assistant message will be added to the end of the file.\n'
+                'An open file will be automatically closed after the first read or write; '
+                'multiple writes will require multiple opens.\n'
+                'Note that this tool uses message contents, not extra tool calls.\n'
+                'Avoid markdown formatting when not writing to a markdown file.',
                 parameters=ToolParams(
                     properties={
-                        "path": PropT("string"),
-                        "content": PropT("string"),
+                        "path": ToolProp("string", "The file to open."),
+                        "mode": ToolProp("string", "The operation to perform on the file: 'r' for read, 'w' for write', or 'a' for append."),
                     },
-                    required=["path", "content"],
+                    required=["path", "mode"],
                 ),
             ),
         )
