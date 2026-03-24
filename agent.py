@@ -1,27 +1,23 @@
+import atexit
 import io
 import json
 import os
 import re
+import readline
 import requests
 import shlex
 import subprocess
 import sys
 
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Generator, Iterable, Iterator
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from string import Template
+from time import time
 from typing import Any, IO
 
 from pydantic import BaseModel, JsonValue
-
-RESET = "\033[0m"
-BOLD = "\033[1m"
-GRAY = "\033[90m"
-RED = "\033[31m"
-GREEN = "\033[32m"
 
 
 class AgentError(Exception):
@@ -55,10 +51,10 @@ class ToolProp(ModelT):
     type: PropType
     description: str | None = None
 
-    def __init__(self, t: str, description: str = ''):
-        kwargs = {'type': t}
+    def __init__(self, t: str, description: str = ""):
+        kwargs = {"type": t}
         if description:
-            kwargs['description'] = description
+            kwargs["description"] = description
         super().__init__(**kwargs)
 
 
@@ -132,7 +128,7 @@ class MsgRole(str, Enum):
 
 class MsgItem(BaseModel):
     role: MsgRole
-    content: str | list[TypedContent] | None
+    content: str | None
     reasoning_content: str | None = None
     tool_calls: list[ToolCallItem] | None = None
     tool_call_id: str | None = None
@@ -180,6 +176,17 @@ class CompletionResponse(BaseModel):
     usage: UsageItem | None = None
 
 
+class StreamingResponse:
+    def __init__(
+        self, stream: Generator[tuple[Any, Any, Any, Any], None, CompletionResponse]
+    ):
+        self._stream = stream
+        self.response: CompletionResponse | None = None
+
+    def __iter__(self) -> Iterator[tuple[Any, Any, Any, Any]]:
+        self.response = yield from self._stream
+
+
 class Client:
     """Connect to a completion server, currently just llama.cpp's OpenAI compatibility layer"""
 
@@ -193,121 +200,205 @@ class Client:
             for m in self.session.get(self.base_uri + "/models").json()["data"]
         }
 
-    def single_completion(
-        self, data: CompletionRequest, stdout: IO[str] = sys.stdout
-    ) -> CompletionResponse:
+    def basic_completion(self, data: CompletionRequest) -> CompletionResponse:
+        assert not data.stream
         resp = self.session.post(
             self.base_uri + "/chat/completions",
             data=data.model_dump_json(exclude_unset=True),
-            stream=data.stream,
+            stream=False,
         )
-        if resp.headers["Content-Type"] == "text/event-stream":
-            return self.assemble_from_stream(resp, stdout=stdout)
-        else:
-            resp_data = CompletionResponse.model_validate_json(resp.content)
-            fin = resp_data.choices[0].finish_reason
-            msg = resp_data.choices[0].message
-            if msg.reasoning_content:
-                stdout.write(f"{GRAY}{msg.reasoning_content}{RESET}\n")
-            if msg.content:
-                stdout.write(f"{msg.content}\n")
-            if fin:
-                stdout.write(f"{GRAY}{fin}{RESET}")
-            return resp_data
+        return CompletionResponse.model_validate_json(resp.content)
 
-    # TODO: cleanup
-    def assemble_from_stream(
-        self,
-        resp: requests.models.Response,
-        stdout: IO[str] = sys.stdout,
-    ) -> CompletionResponse:
+    def _streaming_completion(
+        self, data: CompletionRequest
+    ) -> Generator[tuple[Any, Any, str | None, Any], None, CompletionResponse]:
+        resp = self.session.post(
+            self.base_uri + "/chat/completions",
+            data=data.model_dump_json(exclude_unset=True),
+            stream=True,
+        )
+        assert resp.headers["Content-Type"] == "text/event-stream"
+
         def data_chunker() -> Iterator[dict[str, Any]]:
             for line in resp.iter_lines(chunk_size=None, delimiter=b"\n\n"):
-                if line == b"data: [DONE]":
+                if not line:
+                    continue
+                elif line == b"data: [DONE]":
                     return
-                if line:
-                    yield json.loads(line[len("data: ") :])
+                yield json.loads(line[6:])
+
             raise ValueError("Missing DONE line")
 
-        def w(s: str) -> None:
-            stdout.write(s)
-            stdout.flush()
-
-        reasoning = True
-        tooling = False
-        rfrag = []
-        cfrag = []
+        reason_frag = []
+        content_frag = []
         role = None
         finish_reason = None
-        index = 0  # XXX Assume first response is what we want
-        tfrags: dict[int, ToolCallItem] = {}
-        try:
-            w(GRAY)
-            for chunk in data_chunker():
-                try:
-                    co = chunk["choices"][0]
-                except:
-                    breakpoint()
-                finish_reason = co.get("finish_reason")
-                d = co["delta"]
-                if "role" in d:
-                    role = MsgRole(d["role"])
-                rcontent = d.get("reasoning_content")
-                content = d.get("content")
-                tool_calls = d.get("tool_calls", ())
-                if rcontent:
-                    w(rcontent)
-                    rfrag.append(rcontent)
-                if content:
-                    if reasoning:
-                        reasoning = False
-                        w(f"{RESET}\n")
-                    w(content)
-                    cfrag.append(content)
-                if tool_calls and not tooling:
-                    tooling = True
-                    w(RED)
-                if tooling and not tool_calls:
-                    tooling = False
-                    w(RESET)
-                for t_delta in tool_calls:
-                    tool = tfrags.get(t_delta["index"])
-                    if tool is None:
-                        tool = ToolCallItem.model_validate(t_delta)
-                        w(f"\n{tool.function.name} {tool.function.arguments}")
-                        tfrags[t_delta["index"]] = tool
-                    else:
-                        arg_delta = t_delta["function"]["arguments"]
-                        tool.function.arguments += arg_delta
-                        w(arg_delta)
-                if co["finish_reason"]:
-                    w(f'\n{GRAY}{co["finish_reason"]}\n')
-        finally:
-            w(f"{RESET}\n")
+        tool_frags: dict[int, ToolCallItem] = {}
+
+        for chunk in data_chunker():
+            try:
+                co = chunk["choices"][0]
+            except KeyError:
+                raise ValueError("Missing choices in {chunk}")
+
+            finish_reason = co.get("finish_reason")
+            d = co["delta"]
+
+            if "role" in d:
+                role = MsgRole(d["role"])
+
+            reasoning_content = d.get("reasoning_content")
+            content = d.get("content")
+            tool_calls = d.get("tool_calls", ())
+            tool_delta = None
+
+            if reasoning_content:
+                reason_frag.append(reasoning_content)
+            if content:
+                content_frag.append(content)
+            for t_delta in tool_calls:
+                tool = tool_frags.get(t_delta["index"])
+                if tool is None:
+                    tool = ToolCallItem.model_validate(t_delta)
+                    tool_frags[t_delta["index"]] = tool
+                    tool_delta = f"{tool.function.name} {tool.function.arguments}"
+                else:
+                    arg_delta = t_delta["function"]["arguments"]
+                    tool.function.arguments += arg_delta
+                    tool_delta = arg_delta
+
+            yield content, reasoning_content, tool_delta, finish_reason
 
         assert role is not None
 
         # Build aggregate response off of final chunk
-        m = MsgItem(role=role, content="".join(cfrag))
-        if rfrag:
-            m.reasoning_content = "".join(rfrag)
-        if tfrags:
-            m.tool_calls = list(tfrags.values())
+        m = MsgItem(role=role, content="".join(content_frag))
+        if reason_frag:
+            m.reasoning_content = "".join(reason_frag)
+        if tool_frags:
+            m.tool_calls = list(tool_frags.values())
 
         return CompletionResponse.model_validate(
             {
                 **chunk,
                 "choices": [
-                    ChoiceItem(finish_reason=finish_reason, index=index, message=m)
+                    ChoiceItem(finish_reason=finish_reason, index=0, message=m)
                 ],
             }
         )
+
+    def streaming_completion(self, data: CompletionRequest) -> StreamingResponse:
+        assert data.stream
+        return StreamingResponse(self._streaming_completion(data))
+
+
+class Console:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    GRAY = "\033[90m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+
+    def __init__(
+        self,
+        stdin: IO[str] = sys.stdin,
+        stdout: IO[str] = sys.stdout,
+        color: bool = True,
+        history_file: Path | str | None = None,
+        prompt: str = "> ",
+    ):
+        self.stdin = stdin
+        self.stdout = stdout
+        self.color = color
+        self.prompt = prompt
+        self.history_file: Path | None = None
+        if history_file:
+            self.history_file = Path(history_file).resolve()
+        self.in_reasoning = False
+        self.in_tooling = False
+        self._nfrag = 0
+
+        if self.color:
+            atexit.register(self.reset)
+
+        if self.history_file is not None:
+            readline.parse_and_bind("tab: complete")
+            try:
+                readline.read_history_file(self.history_file)
+                rlh_len = readline.get_current_history_length()
+            except FileNotFoundError:
+                self.history_file.open("wb").close()
+                rlh_len = 0
+
+            def rlh_save(prev_rlh_len: int) -> None:
+                new_rlh_len = readline.get_current_history_length()
+                readline.set_history_length(1000)
+                readline.append_history_file(
+                    new_rlh_len - prev_rlh_len, self.history_file
+                )
+
+            atexit.register(rlh_save, rlh_len)
+
+    def reset(self) -> "Console":
+        self.stdout.write(self.RESET)
+        return self
+
+    def dim(self, text: str = "") -> "Console":
+        self.stdout.write(f"{self.GRAY}{text}")
+        return self
+
+    def bright(self, text: str = "") -> "Console":
+        self.stdout.write(f"{self.RED}{text}")
+        return self
+
+    def sep(self) -> "Console":
+        self.stdout.write("\n")
+        return self
+
+    def input(self) -> str:
+        return input(self.prompt)
+
+    def output(self, s: str) -> "Console":
+        self.stdout.write(s)
+        return self
+
+    def flush(self) -> "Console":
+        self.stdout.flush()
+        return self
+
+    # TODO: better convention for multiple channels?
+    def emit_fragment(
+        self, content: str | None, reasoning: str | None, tooling: Any, stop: Any
+    ) -> "Console":
+        if reasoning:
+            if not self.in_reasoning:
+                self.dim().sep()
+                self.in_reasoning = True
+                self.in_tooling = False
+            self.output(reasoning)
+        if tooling:
+            if not self.in_tooling:
+                self.bright().sep()
+                self.in_reasoning = False
+                self.in_tooling = True
+            self.output(str(tooling))
+        if content:
+            if self.in_reasoning or self.in_tooling:
+                self.reset().sep()
+                self.in_reasoning = False
+                self.in_tooling = False
+            self.output(content)
+        self._nfrag += 1
+        if (self._nfrag & 3) == 0:
+            self.flush()
+        return self
 
 
 class Agent:
     def __init__(
         self,
         client: Client | str,
+        console: Console | None = None,
         model: str | None = None,
         model_identity: str = "You are Ostracod, a helpful assistant.",
         reasoning_effort: str = "medium",
@@ -317,14 +408,16 @@ class Agent:
         working_dir: Path | str = "./workingdir",
         bin_dir: Path | str = "./bin",
         config_dir: Path | str = "./configdir",
+        stdout: IO[str] = sys.stdout,
     ):
+        self.console = console or Console()
         self.config_dir = Path(config_dir).resolve(True)
         self.working_dir = Path(working_dir).resolve(True)
         self.bin_dir = Path(bin_dir).resolve(True)
 
         self.safe_shell = True
         if self.bin_dir in [Path("/bin"), Path("/usr/bin")]:
-            print("DISABLING SHELL SAFETY")
+            self.console.bright("DISABLING SHELL SAFETY").reset().sep()
             self.safe_shell = False
 
         if isinstance(client, str):
@@ -349,10 +442,9 @@ class Agent:
         self.model_data = available_models[model]
         self.tools = {t.meta.name: t for t in tools}
         self.message_history: list[MsgItem] = []
-        self.stdout = stdout
         # TODO: figure out better abstraction for open tool
         self.message_queue: list[MsgItem] = []
-        self.open_fh: io.IOBase | None = None
+        self.open_fh: IO[str] | None = None
 
         for prefix in ("bin", "working", "config"):
             path = getattr(self, f"{prefix}_dir")
@@ -363,6 +455,7 @@ class Agent:
     def model_name(self) -> str:
         return self.model_data.id
 
+    # TODO: figure out how to handle limited context size
     @property
     def model_ctx(self) -> int:
         return self.model_data.meta.get("n_ctx_train", 0)
@@ -383,27 +476,15 @@ class Agent:
 
     @property
     def default_tools(self) -> list[ToolDef]:
-        # return [self.shell_tool, self.write_tool]
         return [self.open_tool, self.shell_tool]
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
         return self.tools[t.function.name].func(self, **kwargs)
 
-    def basic_streaming_completion(self, user_content: str) -> str:
-        data = CompletionRequest(
-            model=self.model_name,
-            messages=[
-                MsgItem(role="system", content=self.system_message),
-                MsgItem(role="user", content=user_content),
-            ],
-            chat_template_kwargs=self.chat_template_kwargs,
-            stream=True,
-        )
-        resp = self.client.single_completion(data, stdout=self.stdout)
-        return resp.choices[0].message.content or ""
-
-    def tool_completion(self, user_content: str | None, stdout: IO[str] = sys.stdout, max_rounds: int = 50) -> str:
+    def streaming_tool_completion(
+        self, user_content: str | None, max_rounds: int = 50
+    ) -> str:
         tool_items = [ToolItem(function=t.meta) for t in self.tools.values()]
         if user_content is not None:
             self.message_history += [MsgItem(role="user", content=user_content)]
@@ -412,39 +493,47 @@ class Agent:
         ] + self.message_history
         tool_rounds = 0
         while True:
-            # print(f"Start loop: {len(msg_items)} msg items")
             data = CompletionRequest(
                 model=self.model_name,
                 messages=msg_items,
-                tools=tool_items if not self.open_fh else [],
-                tool_choice=(
-                    ToolChoice("auto") if not self.open_fh or tool_rounds < max_rounds else ToolChoice("none")
-                ),
                 chat_template_kwargs=self.chat_template_kwargs,
                 stream=True,
             )
-            completion = self.client.single_completion(data, stdout=self.stdout)
-            resp = completion.choices[0]
+            if tool_items and not (self.open_fh and tool_rounds < max_rounds):
+                data.tools = tool_items
+
+            completion = self.client.streaming_completion(data)
+            for frag in completion:
+                self.console.emit_fragment(*frag)
+            self.console.sep()
+            assert completion.response is not None
+            resp = completion.response.choices[0]
             msg_items += [resp.message]
             content = resp.message.content
+            # Hack in open tool functionality
             if content and self.open_fh:
-                # Hack in open tool functionality
-                if len(content) > 8 and content[:3] == '```' and content[-3:] == '```':
-                    content = content[content.index('\n')+1:-3]
+                # Many models can't _not_ put markdown fences around "raw" text:
+                if len(content) > 8 and content[:3] == "```" and content[-3:] == "```":
+                    content = content[content.index("\n") + 1 : -3]
                 self.open_fh.write(content)
                 self.open_fh.close()
                 self.open_fh = None
-                msg_items += [MsgItem(role="tool",
-                    content=f'{{"error": null, "characters_written":{len(content)}}}')]
-                self.stdout.write(f"{GRAY}{msg_items[-1].content}{RESET}\n")
-            # print(msg_items[-1])
-            # print(resp)
+                extra_tool_result = (
+                    f'{{"error": null, "characters_written":{len(content)}}}'
+                )
+                msg_items += [
+                    MsgItem(
+                        role="tool",
+                        content=extra_tool_result,
+                    )
+                ]
+                self.console.dim(extra_tool_result).reset().sep()
             if resp.finish_reason == "tool_calls":
                 if max_rounds <= tool_rounds:
                     raise AgentError("Too many tool calls")
                 for t in resp.message.tool_calls or []:
                     r = json.dumps(self.call_tool(t))
-                    self.stdout.write(f"{GRAY}{r}{RESET}\n")
+                    self.console.dim(r).reset().sep()
                     msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
                     if self.message_queue:
                         msg_items.extend(self.message_queue)
@@ -453,10 +542,29 @@ class Agent:
             elif resp.finish_reason == "stop":
                 final_result = resp.message.content
                 break
-        self.message_history += [
-            MsgItem(role="assistant", content=final_result)
-        ]
-        return final_result or "[ERR: no agent output]"
+        self.message_history += [MsgItem(role="assistant", content=final_result)]
+        assert final_result is not None
+        return final_result
+
+    def run(self) -> None:
+        os.chdir(self.working_dir)
+        while True:
+            inp = self.console.input()
+            if inp[:1] == "/":
+                # Driver commands
+                if inp == "/history"[: len(inp)]:
+                    for msg in self.message_history:
+                        self.console.output(str(msg))
+                else:
+                    self.console.output(f"Unknown command: {inp}")
+            elif inp[:1] == "%":
+                # Shell commands
+                r = self.run_shell_tool(inp[1:])
+                self.console.output(str(r["stderr"]))
+                self.console.output(str(r["stdout"]))
+            else:
+                self.streaming_tool_completion(inp)
+            self.console.sep()
 
     @property
     def tool_env(self) -> dict[str, str]:
@@ -470,7 +578,9 @@ class Agent:
                 env[k] = v
         return env
 
-    def run_shell_tool(self, command: str, stdin: str = '') -> dict[str, str | int | None]:
+    def run_shell_tool(
+        self, command: str, stdin: str = ""
+    ) -> dict[str, str | int | None]:
         s = shlex.shlex(command, posix=True, punctuation_chars=True)
         s.whitespace_split = True
         try:
@@ -495,8 +605,8 @@ class Agent:
                 "stderr": r.stderr.decode(),
             }
 
-        # NB: we rely on restricted PATH and shell for checks, but also
-        # want to have our own checks
+        # NB: we rely on restricted PATH and shell for checks but also
+        # want to have our own checks that look/behave similarly
         def restricted(reason: str) -> dict[str, str | int | None]:
             return {
                 "returncode": 1,
@@ -517,9 +627,9 @@ class Agent:
             return restricted(f"find -{m.group(1)}")
 
         if re.match(r"\bdate\b[^|;&]*\b(-s|--set|(?<=[ '\"])[0-9]{4,8})\b", command):
-            return restricted(f"date --set")
+            return restricted("date --set")
 
-        # TODO: re-allow redirects?
+        # TODO: re-allow redirects somehow?
         r = subprocess.run(
             ["/bin/sh", "-r", "-c", command],
             input=stdin,
@@ -537,9 +647,9 @@ class Agent:
     @property
     def shell_tool(self) -> ToolDef:
         if not self.safe_shell:
-            desc = f"Execute commands in a POSIX shell."
+            desc = "Execute commands in a POSIX shell."
         else:
-            desc = f"Execute commands in a restricted POSIX shell. "
+            desc = "Execute commands in a restricted POSIX shell. "
             'Note that many "dangerous" things (like running a new shell '
             "or changing directories) are not allowed.\n"
             f"PATH contains: {', '.join(f.name for f in self.bin_dir.iterdir())}"
@@ -551,8 +661,15 @@ class Agent:
                 description=desc,
                 parameters=ToolParams(
                     properties={
-                        "command": ToolProp("string", "The command string to pass to the shell. Compound commands are allowed, e.g. \"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\""),
-                        "stdin": ToolProp("string", "A string to serve as standard input for the command.")},
+                        "command": ToolProp(
+                            "string",
+                            "The command string to pass to the shell. Compound commands are allowed, e.g. \"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\"",
+                        ),
+                        "stdin": ToolProp(
+                            "string",
+                            "A string to serve as standard input for the command.",
+                        ),
+                    },
                     required=["command"],
                 ),
             ),
@@ -602,7 +719,10 @@ class Agent:
                         status = f"{path} is ready to be appended to."
 
             if self.open_fh:
-                status += f"\nTHE NEXT MESSAGE FROM THE ASSISTANT WILL BE WRITTEN DIRECTLY TO THE FILE.\nPRODUCE FILE CONTENTS DIRECTLY, DO NOT USE EXTRA FORMATTING, ESCAPING, OR TOOL CALLS!"
+                status += (
+                    "\nTHE NEXT MESSAGE FROM THE ASSISTANT WILL BE WRITTEN DIRECTLY TO THE FILE."
+                    "\nPRODUCE FILE CONTENTS DIRECTLY, DO NOT USE EXTRA FORMATTING, ESCAPING, OR TOOL CALLS!"
+                )
 
         return {
             "error": error,
@@ -615,18 +735,21 @@ class Agent:
             func=self.__class__.run_open_tool,
             meta=ToolFunc(
                 name="open",
-                description='Open `path` as a text file for reading, writing or appending.\n'
+                description="Open `path` as a text file for reading, writing or appending.\n"
                 'If mode is "r", then the next user message will be the file contents.\n'
                 'If mode is "w", then the next assistant message will replace the file contents.\n'
                 'If mode is "a", then the next assistant message will be added to the end of the file.\n'
-                'An open file will be automatically closed after the first read or write; '
-                'multiple writes will require multiple opens.\n'
-                'Note that this tool uses message contents, not extra tool calls.\n'
-                'Avoid markdown formatting when not writing to a markdown file.',
+                "An open file will be automatically closed after the first read or write; "
+                "multiple writes will require multiple opens.\n"
+                "Note that this tool uses message contents, not extra tool calls.\n"
+                "Avoid markdown formatting when not writing to a markdown file.",
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to open."),
-                        "mode": ToolProp("string", "The operation to perform on the file: 'r' for read, 'w' for write', or 'a' for append."),
+                        "mode": ToolProp(
+                            "string",
+                            "The operation to perform on the file: 'r' for read, 'w' for write', or 'a' for append.",
+                        ),
                     },
                     required=["path", "mode"],
                 ),
@@ -634,51 +757,31 @@ class Agent:
         )
 
 
-# TODO: normalize I/O?
 if __name__ == "__main__":
-    import atexit
-    import readline
-    import tomllib
+    # import tomllib
+    # with Path("./configdir/agent.toml").open("rb") as fh:
+    #    agent_config = tomllib.load(fh)["Agent"]
 
-    readline.parse_and_bind("tab: complete")
-    rl_history = Path(".derp_history").resolve()
+    client = Client("http://host.docker.internal:8001/v1")
+    console = Console(history_file=".agent_history")
+
+    agent = Agent(
+        client=client,
+        console=console,
+        model_identity="You are Ostracod, a helpful assistant.",
+        system_message="""You are an interactive agent operating in a workspace.
+
+You can interact with the workspace or broader system using basic commands via the `open` and `shell` tools.
+You need to verify the state of the workspace before making changes to it.
+If possible, try to use an appropriate tool to figure something out or make a change instead of trying to puzzle out the result directly.
+You can ask for clarification and guidance if absolutely necessary, but remember: it's _your_ workspace, and you should trust your judgement.
+If you get stuck in a loop, take a step back and re-evaluate your assumptions.
+""",
+        working_dir="./workingdir",
+        bin_dir="/bin",  # NB: unrestricted shell
+        config_dir="./configdir",
+    )
     try:
-        readline.read_history_file(rl_history)
-        rlh_len = readline.get_current_history_length()
-    except FileNotFoundError:
-        rl_history.open("wb").close()
-        rlh_len = 0
-
-    def rlh_save(prev_rlh_len: int) -> None:
-        new_rlh_len = readline.get_current_history_length()
-        readline.set_history_length(1000)
-        readline.append_history_file(new_rlh_len - prev_rlh_len, rl_history)
-
-    atexit.register(rlh_save, rlh_len)
-
-    with Path("./configdir/agent.toml").open("rb") as fh:
-        agent_config = tomllib.load(fh)["Agent"]
-
-    a = Agent(**agent_config)
-    os.chdir(a.working_dir)
-    try:
-        while True:
-            inp = input("> ")
-            if inp[:1] == "/":
-                # Driver commands
-                if inp == "/empty":
-                    a.tool_completion(None)
-                elif inp == "/history"[: len(inp)]:
-                    for msg in a.message_history:
-                        print(msg)
-                else:
-                    print(f"Unknown command: {inp}")
-            elif inp[:1] == "%":
-                # Shell commands
-                r = a.run_shell_tool(inp[1:])
-                print(r["stderr"])
-                print(r["stdout"])
-            else:
-                a.tool_completion(inp)
+        agent.run()
     except EOFError:
         pass
