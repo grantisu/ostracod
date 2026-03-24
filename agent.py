@@ -5,11 +5,19 @@ import requests
 import shlex
 import subprocess
 
-from enum import Enum
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from string import Template
 
 from pydantic import BaseModel
+
+try:
+    import readline
+except ImportError:
+    pass
 
 
 class AgentError(Exception):
@@ -71,31 +79,14 @@ class ToolFunc(BaseModel):
     description: str
     parameters: ToolParams
 
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        parameters: dict[str, dict] | None = None,
-        required: list[str] | None = None,
-        *,
-        method: str,
-    ):
-        if parameters is None:
-            parameters = ToolParams()
-        if required is None:
-            required = []
-        super().__init__(
-            name=name,
-            description=description,
-            parameters=parameters,
-            required=required,
-        )
-        old_method = _tool_method_map.get(name, None)
-        if old_method and old_method != method:
-            raise ValueError(
-                f"Redefinition of tool method for {name}: {method} (was {old_method})"
-            )
-        _tool_method_map[name] = method
+
+class ToolDef(BaseModel):
+    func: Callable
+    meta: ToolFunc
+
+    model_config = {
+        "arbitrary_types_allowed": True,
+    }
 
 
 class ToolItem(ModelT):
@@ -190,22 +181,22 @@ class Client:
 
 
 def print_basic_completion_response(resp: CompletionResponse):
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    GRAY = '\033[90m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    GRAY = "\033[90m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
 
-    assert(resp.object == 'chat.completion')
+    assert resp.object == "chat.completion"
     # Assume first choice is correct
     c, *_ = resp.choices
-    assert(c.finish_reason is not None)
+    assert c.finish_reason is not None
     m = c.message
-    assert(m.role == 'assistant')
+    assert m.role == "assistant"
 
     think = m.reasoning_content
     if 0 and len(think) > 120:
-        think = think[:80] + '[...]' + think[-30:]
+        think = think[:80] + "[...]" + think[-30:]
 
     msg = m.content
 
@@ -217,14 +208,27 @@ def print_basic_completion_response(resp: CompletionResponse):
 class Agent:
     def __init__(
         self,
-        client: Client,
+        client: Client | str,
         model: str | None = None,
         model_identity="You are Ostracod, a helpful assistant.",
         system_message: str | None = None,
-        tools: list[ToolFunc] | None = None,
-        working_dir: Path | str | None = None,
-        bin_dir: Path | str | None = None,
+        tools: Iterable[ToolDef] | None = None,
+        working_dir: Path | str = "./workingdir",
+        bin_dir: Path | str = "./bin",
+        config_dir: Path | str = "./configdir",
     ):
+        self.config_dir = Path(config_dir).resolve(True)
+        self.working_dir = Path(working_dir).resolve(True)
+        self.bin_dir = Path(bin_dir).resolve(True)
+
+        self.safe_shell = True
+        if self.bin_dir in [Path('/bin'), Path('/usr/bin')]:
+            print("DISABLING SHELL SAFETY")
+            self.safe_shell = False
+
+        if isinstance(client, str):
+            client = Client(client)
+
         if system_message is None:
             system_message = model_identity
 
@@ -232,19 +236,21 @@ class Agent:
         if not model:
             model = list(available_models)[0]
 
+        if tools is None:
+            tools = self.default_tools
+
         self.client = client
         self.model_identity = model_identity
-        self.system_message = system_message
+        # TODO: t-string templates?
+        self.system_template = Template(system_message)
         self.model_data = available_models[model]
-        self.tools = tools or []
-        self.working_dir = Path(working_dir or "./workingdir").resolve(True)
-        self.bin_dir = Path(bin_dir or "./bin").resolve(True)
+        self.tools = {t.meta.name: t for t in tools}
+        self.message_history: list[MsgItem] = []
 
-        if not (self.working_dir.exists() and self.working_dir.is_dir()):
-            raise AgentError(f"Bad working directory given: {self.working_dir}")
-
-        if not (self.bin_dir.exists() and self.bin_dir.is_dir()):
-            raise AgentError(f"Bad bin directory given: {self.bin_dir}")
+        for prefix in ("bin", "working", "config"):
+            path = getattr(self, f"{prefix}_dir")
+            if not (path.exists() and path.is_dir()):
+                raise AgentError(f"Bad {prefix} directory given: {path}")
 
     @property
     def model_name(self):
@@ -254,28 +260,25 @@ class Agent:
     def model_ctx(self):
         return self.model_data.meta.get("n_ctx_train", 0)
 
-    def basic_completion(self, user_content: str):
-        data = CompletionRequest(
-            model=self.model_name,
-            messages=[
-                MsgItem(role="system", content=self.system_message),
-                MsgItem(role="user", content=user_content),
-            ],
+    @property
+    def system_message(self):
+        return self.system_template.substitute(
+            now=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
         )
-        resp = self.client.single_completion(data)
-        return resp.choices[0].message.content
 
-    # TODO: break this up into methods that
-    # - Generate msg_item list
-    # - Loop on tool calls
-    # - Extract final message
-    # - Do history...?
-    def tool_completion(self, user_content: str, max_rounds=10):
-        tool_items = [ToolItem(function=t) for t in self.tools]
-        msg_items = [
-            MsgItem(role="system", content=self.system_message),
-            MsgItem(role="user", content=user_content),
-        ]
+    @property
+    def default_tools(self):
+        return [self.shell_tool, self.write_tool]
+
+    def call_tool(self, t: ToolCallFunc) -> dict:
+        kwargs = t.function.args_as_kwargs()
+        return self.tools[t.function.name].func(self, **kwargs)
+
+    def tool_completion(self, user_content: str | None, max_rounds=50):
+        tool_items = [ToolItem(function=t.meta) for t in self.tools.values()]
+        if user_content is not None:
+            self.message_history += [MsgItem(role="user", content=user_content)]
+        msg_items = [MsgItem(role="system", content=self.system_message)] + self.message_history
         for m in msg_items:
             print(m)
         while True:
@@ -294,30 +297,27 @@ class Agent:
             completion = self.client.single_completion(data)
             print_basic_completion_response(completion)
             resp = completion.choices[0]
-            msg_items.append(resp.message)
+            msg_items += [resp.message]
             # print(msg_items[-1])
             # print(resp)
             if resp.finish_reason == "tool_calls":
                 if max_rounds <= 0:
                     raise AgentError("Too many tool calls")
                 for t in resp.message.tool_calls:
-                    # TODO handle stuff
-                    kwargs = t.function.args_as_kwargs()
-                    f = getattr(self, _tool_method_map[t.function.name])
-                    r = json.dumps(f(**kwargs))
-                    msg_items.append(MsgItem(role="tool", tool_call_id=t.id, content=r))
-                    print(msg_items[-1])
+                    r = json.dumps(self.call_tool(t))
+                    msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
+                    print("TOOL", t.function.name, t.function.arguments, msg_items[-1].content)
                 max_rounds -= 1
             elif resp.finish_reason == "stop":
                 break
-        return resp.message.content
+        self.message_history += [MsgItem(role="assistant", content=resp.message.content)]
+        return resp.message.content or "{ERR: no agent output}"
 
     @property
     def tool_env(self):
         env = {
             "PATH": str(self.bin_dir),
-            "GIT_AUTHOR_NAME": "Ostracod",
-            "GIT_AUTHOR_EMAIL": "",
+            "GIT_CONFIG_GLOBAL": self.config_dir / "gitconfig",
         }
         allowed = {"LANG", "LOCPATH", "NLSPATH"}
         for k, v in os.environ.items():
@@ -325,12 +325,26 @@ class Agent:
                 env[k] = v
         return env
 
-    def shell_hack(self, argv):
+    def run_shell_tool(self, argv: str):
         s = shlex.shlex(argv, posix=True, punctuation_chars=True)
         s.whitespace_split = True
         arg_list = list(s)
 
-        # NB: we mostly rely on restricted PATH and shell for checks, but also want to have our own checks
+        if not self.safe_shell:
+            r = subprocess.run(
+                ["/bin/sh", "-c", argv],
+                capture_output=True,
+                cwd=self.working_dir,
+                timeout=300,
+            )
+            return {
+                "returncode": r.returncode,
+                "stdout": r.stdout.decode(),
+                "stderr": r.stderr.decode(),
+            }
+
+        # NB: we rely on restricted PATH and shell for checks, but also
+        # want to have our own checks
         def restricted(reason: str):
             return {
                 "returncode": 1,
@@ -339,7 +353,7 @@ class Agent:
             }
 
         for a in arg_list:
-            m = re.match(r"^(>+|PATH=|\.\.|[&])", a)
+            m = re.match(r"^([<>]+|PATH=|\.\.|(?<!&)&(?!&))", a)
             if m:
                 return restricted(m.group(1))
 
@@ -350,11 +364,16 @@ class Agent:
         if m:
             return restricted(f"find -{m.group(1)}")
 
+        if re.match(r"\bdate\b[^|;&]*\b(-s|--set|(?<=[ '\"])[0-9]{4,8})\b", argv):
+            return restricted(f"date --set")
+
+        # TODO: re-allow redirects?
         r = subprocess.run(
             ["/bin/sh", "-r", "-c", argv],
             capture_output=True,
             cwd=self.working_dir,
             env=self.tool_env,
+            timeout=30,
         )
         return {
             "returncode": r.returncode,
@@ -362,7 +381,30 @@ class Agent:
             "stderr": r.stderr.decode(),
         }
 
-    def write_hack(self, path, content):
+    @property
+    def shell_tool(self):
+        if not self.safe_shell:
+            desc = f"Execute commands in a POSIX shell "
+        else:
+            desc = f"Execute commands in a restricted POSIX shell. "
+            'Note that many "dangerous" things (like running a new shell '
+            "or changing directories) are not allowed.\n"
+            f"PATH contains: {', '.join(f.name for f in self.bin_dir.iterdir())}",
+
+        return ToolDef(
+            func=self.__class__.run_shell_tool,
+            meta=ToolFunc(
+                name="shell",
+                description=desc,
+                parameters=ToolParams(
+                    properties={"argv": PropT("string")},
+                    required=["argv"],
+                ),
+            ),
+        )
+
+
+    def run_write_tool(self, path: str, content: str):
         path = (self.working_dir / path).resolve()
         try:
             path.relative_to(self.working_dir)
@@ -372,7 +414,7 @@ class Agent:
                 "bytes_written": 0,
             }
 
-        if "/.git/" in path:
+        if "/.git/" in str(path):
             return {
                 "error": "Can't write to files in git repository directly",
                 "bytes_written": 0,
@@ -391,119 +433,49 @@ class Agent:
             "bytes_written": bytes_written,
         }
 
-    # NB: reads whole file into memory, then writes it out in-place without
-    # trying to normalize line endings or whatever
-    def update_hack(self, path, content, line_start=-1, replace=False):
-        path = (self.working_dir / path).resolve()
-        try:
-            path.relative_to(self.working_dir)
-        except ValueError:
-            return {
-                "error": "Path not in working directory",
-                "lines_written": 0,
-                "lines_total": 0,
-            }
-
-        if "/.git/" in path:
-            return {
-                "error": "Can't update files in git repository directly",
-                "bytes_written": 0,
-            }
-
-        try:
-            with path.open("r") as fh:
-                lines = fh.readlines()
-        except FileNotFoundError:
-            lines = []
-
-        if line_start < 0:
-            line_start += len(lines) + 1
-
-        if replace and line_start <= 0:
-            return {
-                "error": "Can't replace lines before start of file",
-                "lines_written": 0,
-                "lines_total": len(lines),
-            }
-
-        content_lines = content.splitlines(True)
-
-        error = None
-        lines_written = 0
-        lines_total = 0
-        try:
-            with path.open("w") as fh:
-                fh.writelines(lines[:line_start])
-                lines_total += line_start
-                fh.writelines(content_lines)
-                lines_written = len(content_lines)
-                lines_total += lines_written
-                if replace:
-                    line_start += len(content_lines)
-                fh.writelines(lines[line_start:])
-                lines_written += len(lines[line_start:])
-        except IOError as e:
-            error = f"Couldn't write lines: {e}"
-
-        return {
-            "error": error,
-            "lines_written": lines_written,
-            "lines_total": lines_total,
-        }
-
-
-if __name__ == "__main__":
-    a = Agent(
-        Client("http://192.168.19.99:8001/v1"),
-        system_message="""You are an interactive agent in a workspace. The workspace might contain git repositories, but it is not itself a git repository.
-
-You have access to some basic tools.
-
-You need to verify the state of the workspace before making changes to it.
-
-You should ask for clarification and guidance if necessary.
-""",
-        tools=[
-            ToolFunc(
-                name="shell",
-                method="shell_hack",
-                description='Execute commands in a restricted POSIX shell. Note that many "dangerous" things (like running a new shell or changing directories) are not allowed.',
-                parameters=ToolParams(
-                    properties={"argv": PropT("string")},
-                    required=["argv"],
-                ),
-            ),
-            ToolFunc(
-                name="write_text",
-                method="write_hack",
-                description="Write `content` to the file at `path`, replacing file contents.",
-                parameters=ToolParams(
-                    properties={"path": PropT("string"), "content": PropT("string")},
-                    required=["path", "content"],
-                ),
-            ),
-            ToolFunc(
-                name="update_text",
-                method="update_hack",
-                description="Write `content` to the file at `path`, optionally specifying a starting line and whether to add or replace lines. Lines are not replaced by default (`replace` is false). Zero offset inserts before first line, negative offsets count backwards from the end of the file. `line_start` defaults to -1, appending to the end of the file.",
+    @property
+    def write_tool(self):
+        return ToolDef(
+            func=self.__class__.run_write_tool,
+            meta=ToolFunc(
+                name="write",
+                description="Write `content` to the file at `path`, replacing "
+                "any existing file contents.",
                 parameters=ToolParams(
                     properties={
                         "path": PropT("string"),
                         "content": PropT("string"),
-                        "line_start": PropT("integer"),
-                        "replace": PropT("boolean"),
                     },
                     required=["path", "content"],
                 ),
             ),
-        ],
-    )
-    # for m in a.client.models():
-    #     print(m)
-    # r = a.basic_completion("Hello!")
-    # r = a.tool_completion("Who are you?")
-    # r = a.tool_completion("Create a Python 'Hello, world!' script in the 'hello' repository if one doesn't exist already. Ensure the result is committed to the master branch.")
-    # r = a.tool_completion("What would it take to add tests to the 'hello' repo?")
-    r = a.tool_completion("Summarize the state of the 'hello' repository.")
-    # breakpoint()
-    # print(r)
+        )
+
+
+# TODO: normalize I/O
+if __name__ == "__main__":
+    import tomllib
+    with Path('./configdir/agent.toml').open('rb') as fh:
+        agent_config = tomllib.load(fh)["Agent"]
+    a = Agent(**agent_config)
+    try:
+        while True:
+            inp = input("> ")
+            if inp[:1] == "/":
+                # Driver commands
+                if inp == '/empty':
+                    a.tool_completion(None)
+                elif inp == '/history'[:len(inp)]:
+                    for msg in a.message_history:
+                        print(msg)
+                else:
+                    print(f"Unknown command: {inp}")
+            elif inp[:1] == "%":
+                # Shell commands
+                r = a.run_shell_tool(inp[1:])
+                print(r["stderr"])
+                print(r["stdout"])
+            else:
+                a.tool_completion(inp)
+    except EOFError:
+        pass
