@@ -595,6 +595,8 @@ class ToolAgent(Agent):
     def system_template_args(self) -> dict[str, str]:
         targs = super().system_template_args()
         targs["working_dir"] = str(self.working_dir)
+        fmt_list = (", " if len(self.tools) != 2 else " ").join(f"`{t}`" for t in self.tools)
+        targs["fmt_tool_list"] = re.sub(r" `[^`]+`$", r" and\g<0>", fmt_list)
         return targs
 
     @property
