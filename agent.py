@@ -563,12 +563,8 @@ class ToolAgent(Agent):
         temperature: float | None = None,
         tools: Iterable[ToolDef] | None = None,
         working_dir: Path | str = "./workingdir",
-        bin_dir: Path | str = "./bin",
-        config_dir: Path | str = "./configdir",
     ):
-        self.config_dir = Path(config_dir).resolve(True)
         self.working_dir = Path(working_dir).resolve(True)
-        self.bin_dir = Path(bin_dir).resolve(True)
 
         super().__init__(
             client=client,
@@ -593,10 +589,8 @@ class ToolAgent(Agent):
                 "WARNING: shell runs arbitrary commands; make sure you want this!"
             ).reset()
 
-        for prefix in ("bin", "working", "config"):
-            path = getattr(self, f"{prefix}_dir")
-            if not (path.exists() and path.is_dir()):
-                raise AgentError(f"Bad {prefix} directory given: {path}")
+        if not (self.working_dir.exists() and self.working_dir.is_dir()):
+            raise AgentError(f"Bad working directory given: {self.working_dir}")
 
     def system_template_args(self) -> dict[str, str]:
         targs = super().system_template_args()
@@ -676,18 +670,6 @@ class ToolAgent(Agent):
     def run(self) -> None:
         os.chdir(self.working_dir)
         super().run()
-
-    @property
-    def tool_env(self) -> dict[str, str]:
-        env = {
-            "PATH": str(self.bin_dir),
-            "GIT_CONFIG_GLOBAL": str(self.config_dir / "gitconfig"),
-        }
-        allowed = {"LANG", "LOCPATH", "NLSPATH"}
-        for k, v in os.environ.items():
-            if k in allowed or k[:3] == "LC_":
-                env[k] = v
-        return env
 
     def run_shell_tool(
         self, command: str, stdin: str = "", env: dict[str, str] | None = None
@@ -1107,8 +1089,6 @@ You can ask for clarification and guidance if absolutely necessary, but remember
 If you get stuck in a loop, take a step back and re-evaluate your assumptions.
 """,
             working_dir="./workingdir",
-            bin_dir="/bin",  # NB: unrestricted shell
-            config_dir="./configdir",
         )
 
     try:
