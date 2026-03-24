@@ -140,6 +140,7 @@ class CompletionRequest(BaseModel):
     chat_template_kwargs: ChatTemplateKwargs | None = None
     stream: bool = False
     response_format: JsonValue = None
+    temperature: float | None = None
     n: int = 1
 
 
@@ -157,9 +158,7 @@ class CompletionResponse(BaseModel):
 
 
 class StreamingResponse:
-    def __init__(
-        self, stream: Generator[tuple[Any, Any, Any, Any], None, CompletionResponse]
-    ):
+    def __init__(self, stream: Generator[tuple[Any, Any, Any, Any], None, CompletionResponse]):
         self._stream = stream
         self.response: CompletionResponse | None = None
 
@@ -202,8 +201,12 @@ class Client:
             stream=True,
         )
         if resp.headers["Content-Type"] != "text/event-stream":
-            breakpoint()
-            raise AgentError(f"Bad response: {resp}")
+            resp_msg = resp.json().get("error", {}).get("message", "")
+            if resp.status_code in (400, 403, 404, 410):
+                err_msg = "Bad Request"
+            else:
+                err_msg = "Non-streaming Response"
+            raise AgentError(f"{err_msg}: [{resp.status_code}] {resp_msg}")
 
         def data_chunker() -> Iterator[dict[str, Any]]:
             for line in resp.iter_lines(chunk_size=None, delimiter=b"\n\n"):
@@ -267,9 +270,7 @@ class Client:
         return CompletionResponse.model_validate(
             {
                 **chunk,
-                "choices": [
-                    ChoiceItem(finish_reason=finish_reason, index=0, message=m)
-                ],
+                "choices": [ChoiceItem(finish_reason=finish_reason, index=0, message=m)],
             }
         )
 
@@ -320,9 +321,7 @@ class Console:
             def rlh_save(prev_rlh_len: int) -> None:
                 new_rlh_len = readline.get_current_history_length()
                 readline.set_history_length(1000)
-                readline.append_history_file(
-                    new_rlh_len - prev_rlh_len, self.history_file
-                )
+                readline.append_history_file(new_rlh_len - prev_rlh_len, self.history_file)
 
             atexit.register(rlh_save, rlh_len)
 
@@ -393,6 +392,7 @@ class Agent:
         reasoning_effort: str = "medium",
         enable_thinking: bool = True,
         system_message: str | None = None,
+        temperature: float | None = None,
     ):
         self.console = console or Console()
 
@@ -410,6 +410,7 @@ class Agent:
         self.model_identity = model_identity
         self.reasoning_effort = reasoning_effort
         self.enable_thinking = enable_thinking
+        self.temperature = temperature
         # TODO: t-string templates?
         self.system_template = Template(f"{model_identity}\n{system_message}")
         self.model_data = available_models[model]
@@ -441,15 +442,11 @@ class Agent:
             enable_thinking=self.enable_thinking,
         )
 
-    def streaming_completion(
-        self, user_content: str | None, max_rounds: int = 50
-    ) -> str:
+    def streaming_completion(self, user_content: str | None, max_rounds: int = 50) -> str:
         if user_content is not None:
             self.message_history += [MsgItem(role="user", content=user_content)]
 
-        msg_items = [
-            MsgItem(role="system", content=self.system_message)
-        ] + self.message_history
+        msg_items = [MsgItem(role="system", content=self.system_message)] + self.message_history
 
         data = CompletionRequest(
             model=self.model_name,
@@ -457,6 +454,8 @@ class Agent:
             chat_template_kwargs=self.chat_template_kwargs,
             stream=True,
         )
+        if self.temperature is not None:
+            data.temperature = self.temperature
         completion = self.client.streaming_completion(data)
         for frag in completion:
             self.console.emit_fragment(*frag)
@@ -472,9 +471,12 @@ class Agent:
         argv: list[str],
         timeout: int = 30,
         cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> dict[str, str | int | None]:
+        if env:
+            env = {**os.environ.copy(), **env}
         try:
-            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd)
+            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd, env=env)
         except subprocess.TimeoutExpired as e:
             return {
                 "returncode": 1,
@@ -507,17 +509,23 @@ class Agent:
 
             if inp[:1] == "/":
                 # Driver commands
-                if inp == "/history"[: len(inp)]:
+                cmd, *args = inp.split()
+                if cmd == "/history"[: len(cmd)]:
                     for msg in self.message_history:
                         self.console.output(str(msg))
-                elif inp == "/empty"[: len(inp)]:
+                elif cmd == "/empty"[: len(cmd)]:
                     self.streaming_completion(None)
+                elif cmd == "/temperature"[: len(cmd)]:
+                    try:
+                        self.temperature = float(args[0])
+                    except (IndexError, ValueError):
+                        self.console.bright(f"Bad temperature args: {args!r}").reset()
                 elif inp[:6] == "/loop ":
                     self.console.bright("Entering loop").reset()
                     loop_prompt = inp[6:]
                     loop_prompt += '\nIf the task is complete, then say "done" with no other preface or formatting.'
                 else:
-                    self.console.output(f"Unknown command: {inp}")
+                    self.console.output(f"Unknown command: {cmd}")
             elif inp[:1] == "%":
                 r = self.subshell_helper(["/bin/sh", "-c", inp[1:]])
                 self.console.output(str(r["stderr"]))
@@ -527,8 +535,14 @@ class Agent:
                 for i in range(3):
                     try:
                         last_output = self.streaming_completion(inp)
-                    except AgentError:
-                        if not loop_prompt:
+                    except AgentError as e:
+                        if str(e).startswith("Bad Request"):
+                            self.console.bright("Removing history up to last user request").reset()
+                            while msg := self.message_history.pop():
+                                if msg.role == "user":
+                                    break
+                            break
+                        elif not loop_prompt:
                             raise
                     else:
                         break
@@ -546,6 +560,7 @@ class ToolAgent(Agent):
         reasoning_effort: str = "medium",
         enable_thinking: bool = True,
         system_message: str | None = None,
+        temperature: float | None = None,
         tools: Iterable[ToolDef] | None = None,
         working_dir: Path | str = "./workingdir",
         bin_dir: Path | str = "./bin",
@@ -563,6 +578,7 @@ class ToolAgent(Agent):
             reasoning_effort=reasoning_effort,
             enable_thinking=enable_thinking,
             system_message=system_message,
+            temperature=temperature,
         )
 
         if tools is None:
@@ -595,14 +611,10 @@ class ToolAgent(Agent):
         kwargs = t.function.args_as_kwargs()
         return self.tools[t.function.name].func(self, **kwargs)
 
-    def streaming_completion(
-        self, user_content: str | None, max_rounds: int = 250
-    ) -> str:
+    def streaming_completion(self, user_content: str | None, max_rounds: int = 250) -> str:
         if user_content is not None:
             self.message_history += [MsgItem(role="user", content=user_content)]
-        msg_items = [
-            MsgItem(role="system", content=self.system_message)
-        ] + self.message_history
+        msg_items = [MsgItem(role="system", content=self.system_message)] + self.message_history
         tool_items = [ToolItem(function=t.meta) for t in self.tools.values()]
         tool_rounds = 0
         while True:
@@ -613,6 +625,8 @@ class ToolAgent(Agent):
                 tool_choice=ToolChoice("none"),
                 stream=True,
             )
+            if self.temperature is not None:
+                data.temperature = self.temperature
             if tool_items and tool_rounds < max_rounds:
                 data.tools = tool_items
                 data.tool_choice = ToolChoice("auto")
@@ -628,7 +642,8 @@ class ToolAgent(Agent):
                 except AgentError as e:
                     self.console.bright(f"FAILED COMPLETION:\n{e}").reset()
                     last_error = e
-                    pass
+                    if str(e).startswith("Bad Request"):
+                        break
                 else:
                     last_error = None
                     break
@@ -655,7 +670,6 @@ class ToolAgent(Agent):
                 final_result = resp.message.content
                 break
         self.message_history += [MsgItem(role="assistant", content=final_result)]
-        # self.message_history = msg_items[1:]
         assert final_result is not None
         return final_result
 
@@ -676,9 +690,9 @@ class ToolAgent(Agent):
         return env
 
     def run_shell_tool(
-        self, command: str, stdin: str = ""
+        self, command: str, stdin: str = "", env: dict[str, str] | None = None
     ) -> dict[str, str | int | None]:
-        return self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir)
+        return self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
 
     @property
     def shell_tool(self) -> ToolDef:
@@ -696,11 +710,17 @@ class ToolAgent(Agent):
                     properties={
                         "command": ToolProp(
                             "string",
-                            "The command string to pass to the shell. Compound commands are allowed, e.g. \"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\"",
+                            "The command string to pass to the shell. "
+                            "Compound commands are allowed, e.g. "
+                            "\"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\"",
                         ),
                         "stdin": ToolProp(
                             "string",
                             "A string to use as standard input for the command.",
+                        ),
+                        "env": ToolProp(
+                            "object",
+                            "A dictionary of environment variables to add to the environment.",
                         ),
                     },
                     required=["command"],
@@ -785,9 +805,7 @@ class ToolAgent(Agent):
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to write."),
-                        "content": ToolProp(
-                            "string", "The data to write into the file."
-                        ),
+                        "content": ToolProp("string", "The data to write into the file."),
                     },
                     required=["path", "content"],
                 ),
@@ -796,9 +814,7 @@ class ToolAgent(Agent):
 
     # TODO: clean this mess up
     @staticmethod
-    def updates_from_patch(
-        working_dir: Path, patch: str
-    ) -> dict[tuple[Path, Path], str]:
+    def updates_from_patch(working_dir: Path, patch: str) -> dict[tuple[Path, Path], str]:
         _patch_lines = iter(patch.splitlines(keepends=True))
 
         fake_plines: list[str] = []
@@ -900,9 +916,7 @@ class ToolAgent(Agent):
             from_line = next_fline()
             while patch_line:
                 # Hunk header
-                m = re.match(
-                    r"^@@(?: -?(\d+)(?:,(\d+))? \+?(\d+)(?:,(\d+))?)?", patch_line
-                )
+                m = re.match(r"^@@(?: -?(\d+)(?:,(\d+))? \+?(\d+)(?:,(\d+))?)?", patch_line)
                 if m is None:
                     if patch_line[:4] == "--- ":
                         break
@@ -934,9 +948,7 @@ class ToolAgent(Agent):
                 else:
                     # Search for hunk
                     if patch_line[0] not in [" ", "-"]:
-                        raise ValueError(
-                            "Need from context to search for unanchored hunks"
-                        )
+                        raise ValueError("Need from context to search for unanchored hunks")
                     while True:
                         if from_line == patch_line[1:]:
                             break
@@ -949,16 +961,18 @@ class ToolAgent(Agent):
                 while patch_line:
                     if from_count is not None and to_count is not None:
                         assert from_start is not None and to_start is not None
-                        if len(from_lines) == (from_start + from_count - 1) and len(
-                            to_lines
-                        ) == (to_start + to_count - 1):
+                        if len(from_lines) == (from_start + from_count - 1) and len(to_lines) == (
+                            to_start + to_count - 1
+                        ):
                             break
 
                     line_prefix, line_content = patch_line[:1], patch_line[1:]
                     match line_prefix:
                         case " ":
                             if line_content != from_line:
-                                raise ValueError(f"Context mismatch; expected {line_content!r} but got {from_line!r}")
+                                raise ValueError(
+                                    f"Context mismatch; expected {line_content!r} but got {from_line!r}"
+                                )
                             to_lines.append(line_content)
                             patch_line = next_pline()
                             from_line = next_fline()
@@ -975,9 +989,7 @@ class ToolAgent(Agent):
                             to_lines.append(line_content)
                             patch_line = next_pline()
                         case "@":
-                            # TODO
-                            # if (...):
-                            #     raise ValueError("Bad line counts")
+                            # TODO if (...): raise ValueError("Bad line counts")
                             break
                         case "":
                             break
@@ -1099,7 +1111,6 @@ If you get stuck in a loop, take a step back and re-evaluate your assumptions.
             config_dir="./configdir",
         )
 
-    print(agent.system_message)
     try:
         agent.run()
     except EOFError:
