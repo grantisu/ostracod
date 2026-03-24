@@ -510,7 +510,15 @@ class Agent:
             if inp[:1] == "/":
                 # Driver commands
                 cmd, *args = inp.split()
-                if cmd == "/messages"[: len(cmd)]:
+                if cmd == "/help"[: len(cmd)]:
+                    self.console.output("""Available commands:
+
+/help: show this message.
+/messages: show past messages that are included in completion context.
+/temperature T: set the temperature to T (should be 0.0 - 2.0, but those limits aren't enforced)
+/loop PROMPT: send PROMPT in a loop until the model thinks it's done.
+""")
+                elif cmd == "/messages"[: len(cmd)]:
                     for msg in self.message_history:
                         self.console.output(str(msg))
                 elif cmd == "/temperature"[: len(cmd)]:
