@@ -215,10 +215,12 @@ class Client:
             data=data.model_dump_json(exclude_unset=True),
             stream=True,
         )
-        if resp.headers["Content-Type"] != "text/event-stream":
+        if resp.headers.get("Content-Type", "") != "text/event-stream":
             resp_msg = resp.json().get("error", {}).get("message", "")
             if resp.status_code in (400, 403, 404, 410):
                 err_msg = "Bad Request"
+            elif resp.status_code >= 500:
+                err_msg = "Server Error"
             else:
                 err_msg = "Non-streaming Response"
             raise AgentError(f"{err_msg}: [{resp.status_code}] {resp_msg}")
