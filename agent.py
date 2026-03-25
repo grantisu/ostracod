@@ -329,6 +329,9 @@ class Console:
             atexit.register(self.reset)
 
         if self.history_file is not None:
+            if self.history_file.is_dir():
+                # TODO: fix this elsewhere
+                self.history_file /= "history"
             readline.parse_and_bind("tab: complete")
             try:
                 readline.read_history_file(self.history_file)
