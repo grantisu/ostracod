@@ -1,5 +1,6 @@
 import atexit
 import json
+import mimetypes
 import os
 import re
 import readline
@@ -7,6 +8,7 @@ import requests
 import subprocess
 import sys
 
+from base64 import b64encode
 from collections.abc import Callable, Generator, Iterable, Iterator
 from datetime import datetime
 from enum import Enum
@@ -113,9 +115,19 @@ class MsgRole(str, Enum):
     user = "user"
 
 
+class Url(BaseModel):
+    url: str
+
+
+class MsgContent(BaseModel):
+    type: str
+    text: str | None = None
+    image_url: Url | None = None
+
+
 class MsgItem(BaseModel):
     role: MsgRole
-    content: str | None
+    content: str | list[MsgContent] | None
     reasoning_content: str | None = None
     tool_calls: list[ToolCallItem] | None = None
     tool_call_id: str | None = None
@@ -463,7 +475,7 @@ class Agent:
         assert completion.response is not None
         final_result = completion.response.choices[0].message.content
         self.message_history += [MsgItem(role="assistant", content=final_result)]
-        assert final_result is not None
+        assert isinstance(final_result, str)
         return final_result
 
     def subshell_helper(
@@ -672,7 +684,7 @@ class ToolAgent(Agent):
                 final_result = resp.message.content
                 break
         self.message_history += [MsgItem(role="assistant", content=final_result)]
-        assert final_result is not None
+        assert isinstance(final_result, str)
         return final_result
 
     def run(self) -> None:
@@ -730,21 +742,30 @@ class ToolAgent(Agent):
             rpath.relative_to(self.working_dir)
         except ValueError:
             return {
-                "error": "Path not in working directory",
+                "error": f"{path!r} not in working directory",
                 "status": None,
             }
 
+        t, _ = mimetypes.guess_file_type(rpath)
         error = None
         status = "No file read."
-        content = ""
+        content: MsgContent
         try:
-            with rpath.open("r") as fh:
-                content = fh.read()
+            with rpath.open("rb") as fh:
+                fdata = fh.read()
+            if str(t).startswith("image/"):
+                content = MsgContent(
+                    type="image_url",
+                    image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
+                )
+            else:
+                content = MsgContent(type="text", text=fdata.decode())
+
         except (IOError, ValueError) as e:
-            error = f"Couldn't read: {e}"
+            error = f"Couldn't read {path!r}: {e}"
         else:
-            status = f"Contents of {path} will appear in next message."
-            self.message_queue.append(MsgItem(role="user", content=content))
+            status = f"Contents of {path!r} will appear in next message."
+            self.message_queue.append(MsgItem(role="user", content=[content]))
 
         return {
             "error": error,
