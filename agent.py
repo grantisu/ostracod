@@ -12,6 +12,7 @@ from base64 import b64encode
 from collections.abc import Callable, Generator, Iterable, Iterator
 from datetime import datetime
 from enum import Enum
+from functools import cached_property
 from pathlib import Path
 from string import Template
 from typing import Any, IO
@@ -202,6 +203,8 @@ class Client:
             data=data.model_dump_json(exclude_unset=True),
             stream=False,
         )
+        if resp.status_code != 200:
+            raise AgentError(resp.json())
         return CompletionResponse.model_validate_json(resp.content)
 
     def _streaming_completion(
@@ -617,6 +620,41 @@ class ToolAgent(Agent):
         targs["fmt_tool_list"] = re.sub(r" `[^`]+`$", r" and\g<0>", fmt_list)
         return targs
 
+    @cached_property
+    def has_mmproj(self) -> bool:
+        # TODO: more efficient check?
+        try:
+            image_url = Url(
+                url="data:image/png;base64,"
+                "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAAAAAA6mKC9AAAAAXNSR0IB2cksfwAAAARnQU1BAACx"
+                "jwv8YQUAAAAgY0hSTQAAeiYAAICEAAD6AAAAgOgAAHUwAADqYAAAOpgAABdwnLpRPAAAAA1JREFU"
+                "GNNjYBgFyAAAARAAAeyX43oAAAAASUVORK5CYII="
+            )
+            self.client.basic_completion(
+                CompletionRequest(
+                    chat_template_kwargs=ChatTemplateKwargs(
+                        model_identity="You are succinct.",
+                        enable_thinking=False,
+                        reasoning_effort="low",
+                    ),
+                    messages=[
+                        MsgItem(
+                            role="user",
+                            content=[
+                                MsgContent(type="text", text="Describe this image in one word."),
+                                MsgContent(
+                                    type="image_url",
+                                    image_url=image_url,
+                                ),
+                            ],
+                        )
+                    ],
+                )
+            )
+        except AgentError as e:
+            return False
+        return True
+
     @property
     def default_tools(self) -> list[ToolDef]:
         return [self.read_tool, self.write_tool, self.shell_tool, self.patch_tool]
@@ -753,7 +791,7 @@ class ToolAgent(Agent):
         try:
             with rpath.open("rb") as fh:
                 fdata = fh.read()
-            if str(t).startswith("image/"):
+            if str(t).startswith("image/") and self.has_mmproj:
                 content = MsgContent(
                     type="image_url",
                     image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
