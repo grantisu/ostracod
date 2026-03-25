@@ -1,4 +1,5 @@
 import atexit
+import io
 import json
 import mimetypes
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 from string import Template
 from typing import Any, IO
 
+from PIL import Image, ImageOps
 from pydantic import BaseModel, JsonValue
 
 
@@ -793,7 +795,14 @@ class ToolAgent(Agent):
         try:
             with rpath.open("rb") as fh:
                 fdata = fh.read()
-            if str(t).startswith("image/") and self.has_mmproj:
+            if t and t.startswith("image/") and self.has_mmproj:
+                if t == "image/jpeg":
+                    # Fix orientation
+                    with Image.open(rpath) as im:
+                        buf = io.BytesIO()
+                        ImageOps.exif_transpose(im, in_place=True)
+                        im.save(buf, format="JPEG", quality=90)
+                        fdata = buf.getvalue()
                 content = MsgContent(
                     type="image_url",
                     image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
