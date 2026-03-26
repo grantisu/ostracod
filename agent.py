@@ -1073,9 +1073,18 @@ class ToolAgent(Agent):
 
         return updates
 
-    def run_patch_tool(self, patch: str) -> dict[str, str | int | None]:
+    def run_patch_tool(self, patch: str, path: str = "") -> dict[str, str | int | None]:
+        rpath = (self.working_dir / path).resolve()
         try:
-            updates = self.updates_from_patch(self.working_dir, patch)
+            rpath.relative_to(self.working_dir)
+        except ValueError:
+            return {
+                "error": f"{path!r} not in working directory",
+                "files_updated": 0,
+            }
+
+        try:
+            updates = self.updates_from_patch(rpath, patch)
         except ValueError as e:
             return {
                 "error": f"Could not apply patch: {e}",
@@ -1111,7 +1120,7 @@ class ToolAgent(Agent):
             func=self.__class__.run_patch_tool,
             meta=ToolFunc(
                 name="apply_patch",
-                description="Apply the given patch.",
+                description="Apply the given patch relative the given directory.",
                 parameters=ToolParams(
                     properties={
                         "patch": ToolProp(
@@ -1131,6 +1140,11 @@ class ToolAgent(Agent):
 @@ -0,0 +1,1 @@
 +D
 """,
+                        ),
+                        "path": ToolProp(
+                            "string",
+                            "The path that files will be made relative to.\n"
+                            "Defaults to the workspace directory.",
                         ),
                     },
                     required=["patch"],
