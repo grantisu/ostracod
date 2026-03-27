@@ -537,12 +537,19 @@ class Agent:
 
 /help: show this message.
 /messages: show past messages that are included in completion context.
+/clear N: clear last N messages; defaults to removing all messages
 /temperature T: set the temperature to T (should be 0.0 - 2.0, but those limits aren't enforced)
 /loop PROMPT: send PROMPT in a loop until the model thinks it's done.
 """)
                 elif cmd == "/messages"[: len(cmd)]:
                     for msg in self.message_history:
                         self.console.output(str(msg))
+                elif cmd == "/clear"[: len(cmd)]:
+                    n = orig_len = len(self.message_history)
+                    if args and args[0].isdigit():
+                        n = int(args[0])
+                    self.message_history = self.message_history[:-n]
+                    self.console.output(f"Cleared {orig_len - len(self.message_history)} messages")
                 elif cmd == "/temperature"[: len(cmd)]:
                     try:
                         self.temperature = float(args[0])
