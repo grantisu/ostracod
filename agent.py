@@ -563,6 +563,10 @@ class Agent:
                 for i in range(3):
                     try:
                         last_output = self.streaming_completion(inp)
+                    except KeyboardInterrupt:
+                        loop_prompt = ""
+                        self.console.bright("Interrupted").reset()
+                        break
                     except AgentError as e:
                         if str(e).startswith("Bad Request"):
                             self.console.bright("Removing history up to last user request").reset()
