@@ -1,6 +1,6 @@
 # Ostracod
 
-Ostracod is a small AI agent I wrote in Python to better understand how to use and interact with LLMs.
+Ostracod is a small AI agent written in Python to better understand how to use and interact with LLMs.
 
 Hopefully it's simple enough to understand most of what's going on,
 while still being messy enough to not discourage hacking on the code.
@@ -8,7 +8,7 @@ while still being messy enough to not discourage hacking on the code.
 ### Usage
 
 The default config assumes that a chat completion server is running locally on port 8001,
-since that's what I used for all of my testing:
+since that's what was used for testing:
 
 ```
 llama-server --host 0.0.0.0 --port 8001 -m something-with-tool-calling-support.gguf [...]
@@ -56,7 +56,9 @@ The `/loop` command can be used for basic vibe coding, e.g.
 ```
 $ docker-compose run -p 8080:8080 agent
 [...]
-> /loop Build a Python todo web app that stores tasks in sqlite. It should be running in the background, listening on port 8080 for requests. Install dependencies as necessary
+> /loop Build a Python todo web app that stores tasks in sqlite. It should be
+ running in the background, listening on port 8080 for requests. Install
+ dependencies as necessary.
 Entering loop
 
 [thinking, tool calls, etc.]
