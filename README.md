@@ -7,11 +7,11 @@ while still being messy enough to not discourage hacking on the code.
 
 ### Usage
 
-The default config assumes that a chat completion server is running locally on port 8001,
+The default config assumes that a chat completion server is running locally on port 8080,
 since that's what was used for testing:
 
 ```
-llama-server --host 0.0.0.0 --port 8001 -m something-with-tool-calling-support.gguf [...]
+llama-server --host 0.0.0.0 --port 8080 -m something-with-tool-calling-support.gguf [...]
 ```
 
 Everything else is meant to run inside a container, to limit how much damage can be done.

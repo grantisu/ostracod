@@ -1170,7 +1170,7 @@ if __name__ == "__main__":
     with Path("./agent.toml").open("rb") as fh:
         agent_config = tomllib.load(fh)["Agent"]
 
-    client = Client("http://host.docker.internal:8001/v1")
+    client = Client("http://host.docker.internal:8080/v1")
     console = Console(history_file=".agent_history")
 
     agent = ToolAgent(
