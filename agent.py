@@ -843,11 +843,14 @@ class ToolAgent(Agent):
 
     @property
     def read_tool(self) -> ToolDef:
+        desc = "Read the contents of the file at `path` into the next user message."
+        if self.has_mmproj:
+            desc += " The file can be text or an image."
         return ToolDef(
             func=lambda s, path: self.__class__.run_read_tool(s, path),
             meta=ToolFunc(
                 name="read",
-                description="Read the contents of the file at `path` into the next user message.",
+                description=desc,
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to read."),
