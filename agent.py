@@ -1176,8 +1176,16 @@ class ToolAgent(Agent):
 if __name__ == "__main__":
     import tomllib
 
+    match len(sys.argv):
+        case 1:
+            conf_id = "Agent"
+        case 2:
+            conf_id = sys.argv[1]
+        case _:
+            raise ValueError("Too many arguments")
+
     with Path("./agent.toml").open("rb") as fh:
-        agent_config = tomllib.load(fh)["Agent"]
+        agent_config = tomllib.load(fh)[conf_id]
 
     client = Client("http://host.docker.internal:8080/v1")
     console = Console(history_file=".agent_history")
