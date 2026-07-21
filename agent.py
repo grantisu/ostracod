@@ -36,7 +36,7 @@ class ModelT(BaseModel):
 
 class ModelData(BaseModel):
     id: str
-    meta: dict[str, int]
+    meta: dict[str, int | str]
 
 
 class PropType(str, Enum):
@@ -445,7 +445,7 @@ class Agent:
     # TODO: figure out how to handle limited context size
     @property
     def model_ctx(self) -> int:
-        return self.model_data.meta.get("n_ctx_train", 0)
+        return int(self.model_data.meta.get("n_ctx_train", 0))
 
     def system_template_args(self) -> dict[str, str]:
         return {
