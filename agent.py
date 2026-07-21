@@ -748,19 +748,21 @@ class ToolAgent(Agent):
         super().run()
 
     def run_shell_tool(
-        self, command: str, stdin: str = "", env: dict[str, str] | None = None
+        self, command: str, stdin: str = "", env: dict[str, str] | None = None, max_output: int = 1024
     ) -> dict[str, str | int | bool | None]:
         result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
         for s in ("stdout", "stderr"):
             r = str(result.get(s, ""))
-            if len(r) > 4000:
-                result[s] = f"{r[:4000]}[TRUNCATED]"
+            if len(r) > max_output:
+                result[s] = f"{r[:max_output]}[TRUNCATED]"
                 result[f"{s}_truncated"] = True
+                result[f"{s}_orig_size"] = len(r)
+                result[f"{s}_orig_lines"] = r.count('\n')
         return result
 
     @property
     def shell_tool(self) -> ToolDef:
-        desc = "Execute commands in a POSIX shell.\n"
+        desc = "Execute commands in a POSIX shell and return the output.\n"
         "Try to avoid using this to read or write entire files; "
         "use the `read` or `write` tools instead.\n"
         "Each call of this tool will spawn a new subshell."
@@ -785,6 +787,10 @@ class ToolAgent(Agent):
                         "env": ToolProp(
                             "object",
                             "A dictionary of environment variables to add to the environment.",
+                        ),
+                        "max_output": ToolProp(
+                            "integer",
+                            "The maximum amount of output to allow before truncating the result.\nDefault: 1024 characters",
                         ),
                     },
                     required=["command"],
