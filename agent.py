@@ -806,10 +806,7 @@ class ToolAgent(Agent):
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
-            return {
-                "error": f"{path!r} not in working directory",
-                "status": None,
-            }
+            self.console.bright("WARNING: reading file outside of working directory!")
 
         t, _ = mimetypes.guess_file_type(rpath)
         error = None
