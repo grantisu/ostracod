@@ -725,6 +725,7 @@ class ToolAgent(Agent):
             assert completion.response is not None
             resp = completion.response.choices[0]
             msg_items += [resp.message]
+            self.message_history += msg_items[-1:]
             if resp.finish_reason == "tool_calls":
                 if max_rounds <= tool_rounds:
                     raise AgentError("Too many tool calls")
@@ -732,8 +733,10 @@ class ToolAgent(Agent):
                     r = json.dumps(self.call_tool(t))
                     self.console.dim(r).reset()
                     msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
+                    self.message_history += msg_items[-1:]
                     if self.message_queue:
                         msg_items.extend(self.message_queue)
+                        self.message_history.extend(self.message_queue)
                         self.message_queue = []
                 tool_rounds += 1
             elif resp.finish_reason == "stop":
