@@ -508,8 +508,8 @@ class Agent:
 
         return {
             "returncode": r.returncode,
-            "stdout": r.stdout.decode(),
-            "stderr": r.stderr.decode(),
+            "stdout": r.stdout.decode(errors="replace"),
+            "stderr": r.stderr.decode(errors="replace"),
         }
 
     def run(self) -> None:
@@ -730,8 +730,13 @@ class ToolAgent(Agent):
                 if max_rounds <= tool_rounds:
                     raise AgentError("Too many tool calls")
                 for t in resp.message.tool_calls or []:
-                    r = json.dumps(self.call_tool(t))
-                    self.console.dim(r).reset()
+                    tool_result = self.call_tool(t)
+                    r: str | list[MsgContent]
+                    if isinstance(tool_result, MsgContent):
+                        r = [tool_result]
+                    else:
+                        r = json.dumps(self.call_tool(t))
+                    self.console.dim(str(r)[:2048]).reset()
                     msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
                     self.message_history += msg_items[-1:]
                     if self.message_queue:
@@ -751,16 +756,26 @@ class ToolAgent(Agent):
         super().run()
 
     def run_shell_tool(
-        self, command: str, stdin: str = "", env: dict[str, str] | None = None, max_output: int = 1024
-    ) -> dict[str, str | int | bool | None]:
+        self,
+        command: str,
+        stdin: str = "",
+        env: dict[str, str] | None = None,
+        max_output: int = 1024,
+        return_json: bool = False,
+    ) -> dict[str, str | int | bool | None] | MsgContent:
         result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
+
         for s in ("stdout", "stderr"):
             r = str(result.get(s, ""))
             if len(r) > max_output:
                 result[s] = f"{r[:max_output]}[TRUNCATED]"
                 result[f"{s}_truncated"] = True
                 result[f"{s}_orig_size"] = len(r)
-                result[f"{s}_orig_lines"] = r.count('\n')
+                result[f"{s}_orig_lines"] = r.count("\n")
+
+        if not return_json:
+            return MsgContent(type="text", text=f"{result["stdout"]}{result["stderr"]}")
+
         return result
 
     @property
@@ -783,6 +798,12 @@ class ToolAgent(Agent):
                             "Compound commands are allowed, e.g. "
                             "\"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\"",
                         ),
+                        "return_json": ToolProp(
+                            "boolean",
+                            r"Whether to return results as structured JSON"
+                            r' (e.g. {"stdout": "Hello\n", "stderr": "ERR\n", "returncode": 1})'
+                            r' instead of a flat stream of data (e.g. "Hello\nERR\n").',
+                        ),
                         "stdin": ToolProp(
                             "string",
                             "A string to use as standard input for the command.",
@@ -801,7 +822,7 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_read_tool(self, path: str) -> dict[str, str | int | None]:
+    def run_read_tool(self, path: str) -> dict[str, str | int | None] | MsgContent:
         rpath = (self.working_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
@@ -810,40 +831,49 @@ class ToolAgent(Agent):
 
         t, _ = mimetypes.guess_file_type(rpath)
         error = None
-        status = "No file read."
+        status = "No file data read."
         content: MsgContent
         try:
             with rpath.open("rb") as fh:
                 fdata = fh.read()
-            if t and t.startswith("image/") and self.has_mmproj:
-                if t == "image/jpeg":
-                    # Fix orientation
-                    with Image.open(rpath) as im:
-                        buf = io.BytesIO()
-                        ImageOps.exif_transpose(im, in_place=True)
-                        im.save(buf, format="JPEG", quality=90)
-                        fdata = buf.getvalue()
-                content = MsgContent(
-                    type="image_url",
-                    image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
-                )
-            else:
-                content = MsgContent(type="text", text=fdata.decode())
-
         except (IOError, ValueError) as e:
-            error = f"Couldn't read {path!r}: {e}"
-        else:
-            status = f"Contents of {path!r} will appear in next message."
-            self.message_queue.append(MsgItem(role="user", content=[content]))
+            error = f"Error reading {path!r}: {e}"
 
-        return {
-            "error": error,
-            "status": status,
-        }
+        else:
+            status = "File data read successfully."
+
+            try:
+                if t in ("image/jpeg", "image/png", "image/gif") and self.has_mmproj:
+                    if t == "image/jpeg":
+                        # Fix orientation
+                        with Image.open(rpath) as im:
+                            buf = io.BytesIO()
+                            ImageOps.exif_transpose(im, in_place=True)
+                            im.save(buf, format="JPEG", quality=90)
+                            fdata = buf.getvalue()
+                    content = MsgContent(
+                        type="image_url",
+                        image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
+                    )
+                else:
+                    content = MsgContent(type="text", text=fdata.decode(errors="replace"))
+                    if len(str(content.text)) > 65536:
+                        error = f"File too big: {len(str(content.text))} chars"
+                        status = f"File read but not sent."
+            except (IOError, ValueError) as e:
+                error = f"Error processing data in {path!r}: {e}"
+
+        if error:
+            return {
+                "error": error,
+                "status": status,
+            }
+        else:
+            return content
 
     @property
     def read_tool(self) -> ToolDef:
-        desc = "Read the contents of the file at `path` into the next user message."
+        desc = "Read the contents of the file at `path` into the next tool message."
         if self.has_mmproj:
             desc += " The file can be text or an image."
         return ToolDef(
@@ -1031,7 +1061,10 @@ class ToolAgent(Agent):
                     else:
                         # Skip to location
                         while len(from_lines) != from_start:
-                            to_lines.append(next_fline())
+                            from_line = next_fline()
+                            if not from_line:
+                                raise ValueError("Hunk goes past end of from file")
+                            to_lines.append(from_line)
                         if to_start:
                             pass  # TODO: check location?
                 else:
