@@ -539,6 +539,7 @@ class Agent:
 /messages: show past messages that are included in completion context.
 /clear N: clear last N messages; defaults to removing all messages
 /temperature T: set the temperature to T (should be 0.0 - 2.0, but those limits aren't enforced)
+/think O: set thinking on or off
 /loop PROMPT: send PROMPT in a loop until the model thinks it's done.
 """)
                 elif cmd == "/messages"[: len(cmd)]:
@@ -554,7 +555,20 @@ class Agent:
                     try:
                         self.temperature = float(args[0])
                     except (IndexError, ValueError):
-                        self.console.bright(f"Bad temperature args: {args!r}").reset()
+                        self.console.bright(f"Bad temperature args: {args!r}\nCurrent temp is: {self.temperature}").reset()
+                elif cmd == "/think"[: len(cmd)]:
+                    try:
+                        v = None
+                        if args[0].lower() in 'on y yes enable t true 1'.split():
+                            v = True
+                        if args[0].lower() in 'off n no disable f false 0'.split():
+                            v = False
+                    except (IndexError, ValueError):
+                        pass
+                    if v is not None:
+                        self.enable_thinking = v
+                    else:
+                        self.console.bright(f"Bad think args: {args!r}\nCurrent thinking is: {self.enable_thinking}").reset()
                 elif inp[:6] == "/loop ":
                     self.console.bright("Entering loop").reset()
                     loop_prompt = inp[6:]
