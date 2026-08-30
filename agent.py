@@ -828,7 +828,7 @@ class ToolAgent(Agent):
         command: str,
         stdin: str = "",
         env: dict[str, str] | None = None,
-        max_output: int = 1024,
+        max_output: int = 8192,
         return_json: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
         result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
@@ -882,7 +882,7 @@ class ToolAgent(Agent):
                         ),
                         "max_output": ToolProp(
                             "integer",
-                            "The maximum amount of output to allow before truncating the result.\nDefault: 1024 characters",
+                            "The maximum amount of output to allow before truncating the result.\nDefault: 8192 characters",
                         ),
                     },
                     required=["command"],
