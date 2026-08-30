@@ -536,7 +536,11 @@ The summary should be suitable to include as a system message by itself, e.g. by
     Agent: Wikipedia lists Mexico City as the largest by population.
 """
 
-        msg_items = [MsgItem(role="system", content=self.system_message)] + self.message_history + [MsgItem(role="system", content=s_msg)]
+        msg_items = (
+            [MsgItem(role="system", content=self.system_message)]
+            + self.message_history
+            + [MsgItem(role="system", content=s_msg)]
+        )
 
         data = CompletionRequest(
             model=self.model_name,
@@ -603,26 +607,32 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     saved_messages.append(self.message_history.pop())
                     saved_messages.reverse()
                     summary = self.summarize_session()
-                    self.message_history = [MsgItem(role="system", content=summary)] + saved_messages
+                    self.message_history = [
+                        MsgItem(role="system", content=summary)
+                    ] + saved_messages
                     self.console.bright("Squeezed session down.").reset()
                 elif cmd == "/temperature"[: len(cmd)]:
                     try:
                         self.temperature = float(args[0])
                     except (IndexError, ValueError):
-                        self.console.bright(f"Bad temperature args: {args!r}\nCurrent temp is: {self.temperature}").reset()
+                        self.console.bright(
+                            f"Bad temperature args: {args!r}\nCurrent temp is: {self.temperature}"
+                        ).reset()
                 elif cmd == "/think"[: len(cmd)]:
                     try:
                         v = None
-                        if args[0].lower() in 'on y yes enable t true 1'.split():
+                        if args[0].lower() in "on y yes enable t true 1".split():
                             v = True
-                        if args[0].lower() in 'off n no disable f false 0'.split():
+                        if args[0].lower() in "off n no disable f false 0".split():
                             v = False
                     except (IndexError, ValueError):
                         pass
                     if v is not None:
                         self.enable_thinking = v
                     else:
-                        self.console.bright(f"Bad think args: {args!r}\nCurrent thinking is: {self.enable_thinking}").reset()
+                        self.console.bright(
+                            f"Bad think args: {args!r}\nCurrent thinking is: {self.enable_thinking}"
+                        ).reset()
                 elif inp[:6] == "/loop ":
                     self.console.bright("Entering loop").reset()
                     loop_prompt = inp[6:]
@@ -670,7 +680,7 @@ class ToolAgent(Agent):
         temperature: float | None = None,
         tools: Iterable[ToolDef] | None = None,
         working_dir: Path | str = "./workingdir",
-        user_agent: str = "ostracod/0.0"
+        user_agent: str = "ostracod/0.0",
     ):
         self.working_dir = Path(working_dir).resolve(True)
         self.user_agent = user_agent
@@ -899,7 +909,9 @@ class ToolAgent(Agent):
         max_output: int = 16384,
         return_html: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
-        command = f"curl -sSL -A '{self.user_agent} (curl)' -H 'Accept: text/html,text/*;q=0.9' '{url}'"
+        command = (
+            f"curl -sSL -A '{self.user_agent} (curl)' -H 'Accept: text/html,text/*;q=0.9' '{url}'"
+        )
         if not return_html:
             command = f"lynx -useragent='{self.user_agent} (Lynx)' -dump -dont_wrap_pre -hiddenlinks=ignore -underscore '{url}'"
         result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir)
@@ -929,13 +941,10 @@ class ToolAgent(Agent):
                 description=desc,
                 parameters=ToolParams(
                     properties={
-                        "url": ToolProp(
-                            "string",
-                            "The URL to fetch."
-                        ),
+                        "url": ToolProp("string", "The URL to fetch."),
                         "return_html": ToolProp(
                             "boolean",
-                            r"Whether to return the original response (typically HTML) or attempt to convert it to plain text."
+                            r"Whether to return the original response (typically HTML) or attempt to convert it to plain text.",
                         ),
                         "max_output": ToolProp(
                             "integer",
