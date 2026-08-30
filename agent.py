@@ -512,6 +512,49 @@ class Agent:
             "stderr": r.stderr.decode(errors="replace"),
         }
 
+    def summarize_session(self) -> str:
+        s_msg = """Summarize the current session so that it can be resumed without disruption later.
+
+Omit the first system message (it will be included verbatim when resumed), but make a concise and accurate summary of all other messages. Each summary must include:
+
+- All topics discussed (major topics should get a sentence or two; minor topics can be summarized as one or two words in a list of topics covered)
+- All tasks performed (including which tools were used, but not including full tool output; relevant snippets can be included)
+- The _results_ of all tasks performed
+- All new information uncovered
+- All unresolved questions
+- Anything else necessary to seamlessly continue the session (if it's not in the first system message or the summary, then it will be forgotten!)
+
+The summary should be suitable to include as a system message by itself, e.g. by starting with an explanation followed by a list of (condensed) messages:
+
+    This is a continuation of an existing session; resume from where the original left off. Here is a highly abridged record of the session so far:
+
+    User: Hello
+    Agent: How can I help you today?
+    User: What country has the biggest capital city?
+    Agent: [I need to look up the largest capital by population.
+      shell {"command":"w3m -dump https://en.wikipedia.org/wiki/List_of_national_capitals_by_population | grep -E \\"Population|City\\" | head -n 20"}]
+    Agent: Wikipedia lists Mexico City as the largest by population.
+"""
+
+        msg_items = [MsgItem(role="system", content=self.system_message)] + self.message_history + [MsgItem(role="system", content=s_msg)]
+
+        data = CompletionRequest(
+            model=self.model_name,
+            messages=msg_items,
+            chat_template_kwargs=self.chat_template_kwargs,
+            stream=True,
+        )
+        if self.temperature is not None:
+            data.temperature = self.temperature
+        completion = self.client.streaming_completion(data)
+        for frag in completion:
+            self.console.emit_fragment(*frag)
+        self.console.sep()
+        assert completion.response is not None
+        final_result = completion.response.choices[0].message.content
+        assert isinstance(final_result, str)
+        return final_result
+
     def run(self) -> None:
         loop_prompt = ""
         loop_until = "done"
@@ -538,6 +581,7 @@ class Agent:
 /help: show this message.
 /messages: show past messages that are included in completion context.
 /clear N: clear last N messages; defaults to removing all messages
+/squeeze: replace message history with a summary to free up context
 /temperature T: set the temperature to T (should be 0.0 - 2.0, but those limits aren't enforced)
 /think O: set thinking on or off
 /loop PROMPT: send PROMPT in a loop until the model thinks it's done.
@@ -551,6 +595,16 @@ class Agent:
                         n = int(args[0])
                     self.message_history = self.message_history[:-n]
                     self.console.output(f"Cleared {orig_len - len(self.message_history)} messages")
+                elif cmd == "/squeeze"[: len(cmd)]:
+                    # Save last interaction to smooth the transition
+                    saved_messages = []
+                    while self.message_history and self.message_history[-1].role != "user":
+                        saved_messages.append(self.message_history.pop())
+                    saved_messages.append(self.message_history.pop())
+                    saved_messages.reverse()
+                    summary = self.summarize_session()
+                    self.message_history = [MsgItem(role="system", content=summary)] + saved_messages
+                    self.console.bright("Squeezed session down.").reset()
                 elif cmd == "/temperature"[: len(cmd)]:
                     try:
                         self.temperature = float(args[0])
