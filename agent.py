@@ -670,8 +670,10 @@ class ToolAgent(Agent):
         temperature: float | None = None,
         tools: Iterable[ToolDef] | None = None,
         working_dir: Path | str = "./workingdir",
+        user_agent: str = "ostracod/0.0"
     ):
         self.working_dir = Path(working_dir).resolve(True)
+        self.user_agent = user_agent
 
         super().__init__(
             client=client,
@@ -743,7 +745,7 @@ class ToolAgent(Agent):
 
     @property
     def default_tools(self) -> list[ToolDef]:
-        return [self.read_tool, self.write_tool, self.shell_tool, self.patch_tool]
+        return [self.read_tool, self.write_tool, self.shell_tool, self.patch_tool, self.web_tool]
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
@@ -886,6 +888,61 @@ class ToolAgent(Agent):
                         ),
                     },
                     required=["command"],
+                ),
+            ),
+        )
+
+    def run_web_tool(
+        self,
+        url: str,
+        # data: str = "",
+        max_output: int = 8192,
+        return_html: bool = False,
+    ) -> dict[str, str | int | bool | None] | MsgContent:
+        command = f"curl -sSL -A '{self.user_agent} (curl)' -H 'Accept: text/html,text/*;q=0.9' '{url}'"
+        if not return_html:
+            command = f"lynx -useragent='{self.user_agent} (Lynx)' -dump -dont_wrap_pre -hiddenlinks=ignore -underscore '{url}'"
+        result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir)
+
+        for s in ("stdout", "stderr"):
+            r = str(result.get(s, ""))
+            if len(r) > max_output:
+                result[s] = f"{r[:max_output]}[TRUNCATED]"
+                result[f"{s}_truncated"] = True
+                result[f"{s}_orig_size"] = len(r)
+                result[f"{s}_orig_lines"] = r.count("\n")
+
+        return MsgContent(type="text", text=f"{result["stdout"]}{result["stderr"]}")
+
+    @property
+    def web_tool(self) -> ToolDef:
+        desc = "Make simple web requests.\n"
+        "By default, HTML will be converted to plain text:"
+        " links will have numbers next to them, and"
+        " the link targets will be listed at the end.\n"
+        "Note: long output will get truncated."
+
+        return ToolDef(
+            func=self.__class__.run_web_tool,
+            meta=ToolFunc(
+                name="web",
+                description=desc,
+                parameters=ToolParams(
+                    properties={
+                        "url": ToolProp(
+                            "string",
+                            "The URL to fetch."
+                        ),
+                        "return_html": ToolProp(
+                            "boolean",
+                            r"Whether to return the original response (typically HTML) or attempt to convert it to plain text."
+                        ),
+                        "max_output": ToolProp(
+                            "integer",
+                            "The maximum amount of output to allow before truncating the result.\nDefault: 8192 characters",
+                        ),
+                    },
+                    required=["url"],
                 ),
             ),
         )
