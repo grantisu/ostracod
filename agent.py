@@ -830,7 +830,7 @@ class ToolAgent(Agent):
         command: str,
         stdin: str = "",
         env: dict[str, str] | None = None,
-        max_output: int = 8192,
+        max_output: int = 16384,
         return_json: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
         result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
@@ -884,7 +884,7 @@ class ToolAgent(Agent):
                         ),
                         "max_output": ToolProp(
                             "integer",
-                            "The maximum amount of output to allow before truncating the result.\nDefault: 8192 characters",
+                            "The maximum amount of output to allow before truncating the result.\nDefault: 16384 characters",
                         ),
                     },
                     required=["command"],
@@ -896,7 +896,7 @@ class ToolAgent(Agent):
         self,
         url: str,
         # data: str = "",
-        max_output: int = 8192,
+        max_output: int = 16384,
         return_html: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
         command = f"curl -sSL -A '{self.user_agent} (curl)' -H 'Accept: text/html,text/*;q=0.9' '{url}'"
@@ -939,7 +939,7 @@ class ToolAgent(Agent):
                         ),
                         "max_output": ToolProp(
                             "integer",
-                            "The maximum amount of output to allow before truncating the result.\nDefault: 8192 characters",
+                            "The maximum amount of output to allow before truncating the result.\nDefault: 16384 characters",
                         ),
                     },
                     required=["url"],
