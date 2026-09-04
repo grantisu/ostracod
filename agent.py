@@ -568,8 +568,8 @@ The summary should be suitable to include as a system message by itself, e.g. by
                 inp = loop_prompt
                 if last_output.strip().lower() == loop_until.lower():
                     self.console.bright("Loop completed.").reset()
-                    loop_until = ""
                     loop_prompt = ""
+                    last_output = ""
 
             if loop_prompt:
                 self.console.output(inp).sep()
@@ -597,6 +597,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     n = orig_len = len(self.message_history)
                     if args and args[0].isdigit():
                         n = int(args[0])
+                    last_output = ""
                     self.message_history = self.message_history[:-n]
                     self.console.output(f"Cleared {orig_len - len(self.message_history)} messages")
                 elif cmd == "/squeeze"[: len(cmd)]:
@@ -636,7 +637,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
                 elif inp[:6] == "/loop ":
                     self.console.bright("Entering loop").reset()
                     loop_prompt = inp[6:]
-                    loop_prompt += '\nIf the task is complete, then say "done" with no other preface or formatting.'
+                    loop_prompt += '\nWhen the task is complete, say "done" as a single word in a single message with no other preface or formatting.'
                 else:
                     self.console.output(f"Unknown command: {cmd}")
             elif inp[:1] == "%":
