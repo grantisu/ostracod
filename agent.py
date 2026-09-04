@@ -756,7 +756,7 @@ class ToolAgent(Agent):
 
     @property
     def default_tools(self) -> list[ToolDef]:
-        return [self.read_tool, self.write_tool, self.shell_tool, self.patch_tool, self.web_tool]
+        return [self.read_tool, self.write_tool, self.shell_tool, self.web_tool]
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
@@ -865,6 +865,7 @@ class ToolAgent(Agent):
         "Try to avoid using this to read or write entire files; "
         "use the `read` or `write` tools instead.\n"
         "Each call of this tool will spawn a new subshell."
+        'Note: long output will get truncated and end with "[TRUNCATED]".'
 
         return ToolDef(
             func=self.__class__.run_shell_tool,
@@ -877,7 +878,7 @@ class ToolAgent(Agent):
                             "string",
                             "The command string to pass to the shell. "
                             "Compound commands are allowed, e.g. "
-                            "\"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o foo | wc -l) ; done\"",
+                            "\"for fn in $(find . -name '*.txt') ; do echo $(basename $fn) $(grep -o 'some string' | wc -l) ; done\"",
                         ),
                         "return_json": ToolProp(
                             "boolean",
@@ -895,7 +896,7 @@ class ToolAgent(Agent):
                         ),
                         "max_output": ToolProp(
                             "integer",
-                            "The maximum amount of output to allow before truncating the result.\nDefault: 16384 characters",
+                            "The maximum amount of output to allow before truncating the result. Adjust this to see more or less output.\nDefault: 16384 characters",
                         ),
                     },
                     required=["command"],
@@ -933,7 +934,7 @@ class ToolAgent(Agent):
         "By default, HTML will be converted to plain text:"
         " links will have numbers next to them, and"
         " the link targets will be listed at the end.\n"
-        "Note: long output will get truncated."
+        'Note: long output will get truncated and end with "[TRUNCATED]".'
 
         return ToolDef(
             func=self.__class__.run_web_tool,
@@ -949,7 +950,7 @@ class ToolAgent(Agent):
                         ),
                         "max_output": ToolProp(
                             "integer",
-                            "The maximum amount of output to allow before truncating the result.\nDefault: 16384 characters",
+                            "The maximum amount of output to allow before truncating the result. Adjust this to see more or less output.\nDefault: 16384 characters",
                         ),
                     },
                     required=["url"],
