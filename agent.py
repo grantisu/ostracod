@@ -818,7 +818,7 @@ class ToolAgent(Agent):
                     if isinstance(tool_result, MsgContent):
                         r = [tool_result]
                     else:
-                        r = json.dumps(self.call_tool(t))
+                        r = json.dumps(tool_result)
                     self.console.dim(str(r)[:2048]).reset()
                     msg_items += [MsgItem(role="tool", tool_call_id=t.id, content=r)]
                     self.message_history += msg_items[-1:]
