@@ -681,9 +681,11 @@ class ToolAgent(Agent):
         temperature: float | None = None,
         tools: Iterable[ToolDef] | None = None,
         working_dir: Path | str = "./workingdir",
+        webcache_dir: Path | str = "/tmp/webcache",
         user_agent: str = "ostracod/0.0",
     ):
         self.working_dir = Path(working_dir).resolve(True)
+        self.webcache_dir = Path(webcache_dir).resolve()
         self.user_agent = user_agent
 
         super().__init__(
@@ -911,11 +913,22 @@ class ToolAgent(Agent):
         max_output: int = 16384,
         return_html: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
-        command = (
-            f"curl -sSL -A '{self.user_agent} (curl)' -H 'Accept: text/html,text/*;q=0.9' '{url}'"
+        wget_command = (
+            f"wget -U '{self.user_agent} (wget)' --header 'Accept: text/html,text/*;q=0.9'"
+            f" -P '{self.webcache_dir}' --restrict-file-names=windows -Nkx '{url}' 2>&1"
+            f" | grep -o '{self.webcache_dir}[^’]*' | head -1"
         )
+        file = Path(
+            self.subshell_helper(["/bin/sh", "-c", wget_command], cwd=self.working_dir).get(
+                "stdout", "MISSING FILE NAME\n"
+            )[:-1]
+        )
+
+        command = f"cat '{file}'"
         if not return_html:
-            command = f"lynx -useragent='{self.user_agent} (Lynx)' -dump -dont_wrap_pre -hiddenlinks=ignore -underscore '{url}'"
+            command = (
+                f"lynx -dump -force_html -dont_wrap_pre -hiddenlinks=ignore -underscore '{file}'"
+            )
         result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir)
 
         for s in ("stdout", "stderr"):
@@ -934,6 +947,7 @@ class ToolAgent(Agent):
         "By default, HTML will be converted to plain text:"
         " links will have numbers next to them, and"
         " the link targets will be listed at the end.\n"
+        f"Retrieved documents will be cached under `{self.webcache_dir}`.\n"
         'Note: long output will get truncated and end with "[TRUNCATED]".'
 
         return ToolDef(
