@@ -1057,7 +1057,7 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_write_tool(self, path: str, content: str) -> dict[str, str | int | None]:
+    def run_write_tool(self, path: str, content: str, append=False) -> dict[str, str | int | None]:
         rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
@@ -1070,7 +1070,7 @@ class ToolAgent(Agent):
         error = None
         bytes_written = 0
         try:
-            with rpath.open("w") as fh:
+            with rpath.open("a" if append else "w") as fh:
                 bytes_written = fh.write(content)
         except (IOError, ValueError) as e:
             error = f"Couldn't write to {path}: {e}"
@@ -1092,6 +1092,11 @@ class ToolAgent(Agent):
                     properties={
                         "path": ToolProp("string", "The file to write."),
                         "content": ToolProp("string", "The data to write into the file."),
+                        "append": ToolProp(
+                            "boolean",
+                            "Append to the end of the file instead of overwriting it.\n"
+                            "Default: false",
+                        ),
                     },
                     required=["path", "content"],
                 ),
