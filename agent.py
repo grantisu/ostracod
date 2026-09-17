@@ -937,12 +937,12 @@ class ToolAgent(Agent):
             )[:-1]
         )
 
-        command = f"cat '{file}'"
+        command = ["cat", file]
         if not return_html:
             command = (
-                f"lynx -dump -force_html -dont_wrap_pre -hiddenlinks=ignore -underscore '{file}'"
+                "lynx -dump -force_html -dont_wrap_pre -hiddenlinks=ignore -underscore".split(" ") + [file]
             )
-        result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir)
+        result = self.subshell_helper(command, cwd=self.working_dir)
 
         for s in ("stdout", "stderr"):
             r = str(result.get(s, ""))
