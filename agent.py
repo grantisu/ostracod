@@ -692,6 +692,7 @@ class ToolAgent(Agent):
         user_agent: str = "ostracod/0.0",
     ):
         self.working_dir = Path(working_dir).resolve(True)
+        self.current_dir = self.working_dir
         self.webcache_dir = Path(webcache_dir).resolve()
         self.user_agent = user_agent
 
@@ -769,6 +770,7 @@ class ToolAgent(Agent):
             self.read_tool,
             self.write_tool,
             self.edit_line_tool,
+            self.changedir_tool,
             self.shell_tool,
             self.web_tool,
         ]
@@ -859,7 +861,7 @@ class ToolAgent(Agent):
         max_output: int = 16384,
         return_json: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
-        result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.working_dir, env=env)
+        result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.current_dir, env=env)
 
         for s in ("stdout", "stderr"):
             r = str(result.get(s, ""))
@@ -932,7 +934,7 @@ class ToolAgent(Agent):
             f" | grep -o '{self.webcache_dir}[^’]*' | head -1"
         )
         file = Path(
-            self.subshell_helper(["/bin/sh", "-c", wget_command], cwd=self.working_dir).get(
+            self.subshell_helper(["/bin/sh", "-c", wget_command], cwd=self.current_dir).get(
                 "stdout", "MISSING FILE NAME\n"
             )[:-1]
         )
@@ -942,7 +944,7 @@ class ToolAgent(Agent):
             command = (
                 "lynx -dump -force_html -dont_wrap_pre -hiddenlinks=ignore -underscore".split(" ") + [file]
             )
-        result = self.subshell_helper(command, cwd=self.working_dir)
+        result = self.subshell_helper(command, cwd=self.current_dir)
 
         for s in ("stdout", "stderr"):
             r = str(result.get(s, ""))
@@ -986,7 +988,7 @@ class ToolAgent(Agent):
         )
 
     def run_read_tool(self, path: str) -> dict[str, str | int | None] | MsgContent:
-        rpath = (self.working_dir / path).resolve()
+        rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
@@ -1054,7 +1056,7 @@ class ToolAgent(Agent):
         )
 
     def run_write_tool(self, path: str, content: str) -> dict[str, str | int | None]:
-        rpath = (self.working_dir / path).resolve()
+        rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
@@ -1290,7 +1292,7 @@ class ToolAgent(Agent):
         return updates
 
     def run_patch_tool(self, patch: str, path: str = "") -> dict[str, str | int | None]:
-        rpath = (self.working_dir / path).resolve()
+        rpath = (self.current_dir).resolve()
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
@@ -1371,7 +1373,7 @@ class ToolAgent(Agent):
     def run_edit_line_tool(
         self, path: str, line_no: int, action: str, content: str
     ) -> dict[str, str | int | None]:
-        rpath = (self.working_dir / path).resolve()
+        rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
@@ -1458,6 +1460,40 @@ class ToolAgent(Agent):
                         ),
                     },
                     required=["path", "line_no", "action", "content"],
+                ),
+            ),
+        )
+
+    def run_changedir_tool(self, path: str) -> dict[str, str | int | None]:
+        error = None
+        rpath = (self.current_dir / path).resolve()
+        try:
+            rpath.relative_to(self.working_dir)
+        except ValueError:
+            error = f"Path not in working directory: {rpath}"
+        else:
+            if rpath.is_dir():
+                self.current_dir = rpath
+            else:
+                error = f"Path does not exist: {rpath}"
+
+        return {
+            "error": error,
+            "current_path": str(self.current_dir),
+        }
+
+    @property
+    def changedir_tool(self) -> ToolDef:
+        return ToolDef(
+            func=self.__class__.run_changedir_tool,
+            meta=ToolFunc(
+                name="changedir",
+                description="Change the directory that tools will be called relative to.",
+                parameters=ToolParams(
+                    properties={
+                        "path": ToolProp("string", "The target path."),
+                    },
+                    required=["path"],
                 ),
             ),
         )
