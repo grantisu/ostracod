@@ -8,10 +8,11 @@ import readline
 import requests
 import subprocess
 import sys
+import time
 
 from base64 import b64encode
 from collections.abc import Callable, Generator, Iterable, Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
@@ -564,6 +565,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
         loop_prompt = ""
         loop_until = "done"
         last_output = ""
+        start = 0.0
         while True:
             if loop_prompt:
                 inp = loop_prompt
@@ -575,7 +577,11 @@ The summary should be suitable to include as a system message by itself, e.g. by
             if loop_prompt:
                 self.console.output(inp).sep()
             else:
+                if start > 0.0:
+                    duration = timedelta(seconds=time.time() - start)
+                    self.console.dim(f"({duration})").reset()
                 inp = self.console.input()
+                start = time.time()
 
             if inp[:1] == "/":
                 # Driver commands
