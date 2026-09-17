@@ -765,7 +765,13 @@ class ToolAgent(Agent):
 
     @property
     def default_tools(self) -> list[ToolDef]:
-        return [self.read_tool, self.write_tool, self.shell_tool, self.web_tool]
+        return [
+            self.read_tool,
+            self.write_tool,
+            self.edit_line_tool,
+            self.shell_tool,
+            self.web_tool,
+        ]
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
@@ -1358,6 +1364,100 @@ class ToolAgent(Agent):
                         ),
                     },
                     required=["patch"],
+                ),
+            ),
+        )
+
+    def run_edit_line_tool(
+        self, path: str, line_no: int, action: str, content: str
+    ) -> dict[str, str | int | None]:
+        rpath = (self.working_dir / path).resolve()
+        try:
+            rpath.relative_to(self.working_dir)
+        except ValueError:
+            return {
+                "error": "Path not in working directory",
+                "bytes_written": 0,
+            }
+
+        lines = None
+        error = None
+        bytes_written = 0
+        try:
+            with rpath.open("r") as fh:
+                inp = fh.read()
+        except (IOError, ValueError) as e:
+            error = f"Couldn't read {path}: {e}"
+        else:
+            lines = inp.split("\n")
+
+        # TODO: be more strict?
+        if lines is not None:
+            if action == "add":
+                lines.insert(line_no, content)
+            elif action == "delete":
+                try:
+                    l = lines.pop(line_no - 1)
+                except IndexError:
+                    error = "`line_no` out of range"
+                else:
+                    if l != content:
+                        error = f"Line content mismatch; original content: {l}"
+            elif action == "replace":
+                try:
+                    lines[line_no - 1] = content
+                except IndexError:
+                    error = "`line_no` out of range"
+            else:
+                error = f"Unknown action: {action}"
+
+        if error is None:
+            try:
+                with rpath.open("w") as fh:
+                    bytes_written = fh.write("\n".join(lines))
+            except (IOError, ValueError) as e:
+                error = f"Couldn't read {path}: {e}"
+
+        return {
+            "error": error,
+            "bytes_written": bytes_written,
+        }
+
+    @property
+    def edit_line_tool(self) -> ToolDef:
+        return ToolDef(
+            func=self.__class__.run_edit_line_tool,
+            meta=ToolFunc(
+                name="edit_line",
+                description="Add, delete, or replace the line at `line_no` in the file at `path`.",
+                parameters=ToolParams(
+                    properties={
+                        "path": ToolProp("string", "The file to write."),
+                        "line_no": ToolProp(
+                            "integer",
+                            (
+                                "Line to operate on. Line indexes start at 1. "
+                                "When adding a line, the line is added after the given index; "
+                                "a line can be added before the first line by setting `line_no` to 0."
+                            ),
+                        ),
+                        "action": ToolProp(
+                            "string",
+                            (
+                                "Which action to perfom. "
+                                'Must be one of "add", "delete", or "replace".'
+                            ),
+                        ),
+                        "content": ToolProp(
+                            "string",
+                            (
+                                'The content of the line. If the action is "delete", '
+                                "then this must match the original line. For other actions, "
+                                "this will be the new content at that line."
+                            ),
+                        ),
+                    },
+                    required=["path", "line_no", "action", "content"],
                 ),
             ),
         )
