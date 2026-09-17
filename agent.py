@@ -532,7 +532,8 @@ The summary should be suitable to include as a system message by itself, e.g. by
     Agent: How can I help you today?
     User: What country has the biggest capital city?
     Agent: [I need to look up the largest capital by population.
-      shell {"command":"w3m -dump https://en.wikipedia.org/wiki/List_of_national_capitals_by_population | grep -E \\"Population|City\\" | head -n 20"}]
+      web {"url": "https://en.wikipedia.org/wiki/List_of_national_capitals_by_population"}
+    ]
     Agent: Wikipedia lists Mexico City as the largest by population.
 """
 
