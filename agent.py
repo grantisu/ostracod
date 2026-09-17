@@ -590,8 +590,8 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     self.console.output("""Available commands:
 
 /help: show this message.
-/messages: show past messages that are included in completion context.
 /clear N: clear last N messages; defaults to removing all messages
+/messages: show past messages that are included in completion context.
 /squeeze: replace message history with a summary to free up context
 /temperature T: set the temperature to T (should be 0.0 - 2.0, but those limits aren't enforced)
 /think O: set thinking on or off
@@ -943,7 +943,8 @@ class ToolAgent(Agent):
         command = ["cat", file]
         if not return_html:
             command = (
-                "lynx -dump -force_html -dont_wrap_pre -hiddenlinks=ignore -underscore".split(" ") + [file]
+                "lynx -dump -force_html -dont_wrap_pre -hiddenlinks=ignore -underscore".split(" ")
+                + [file]
             )
         result = self.subshell_helper(command, cwd=self.current_dir)
 
@@ -1039,7 +1040,7 @@ class ToolAgent(Agent):
 
     @property
     def read_tool(self) -> ToolDef:
-        desc = "Read the contents of the file at `path` into the next tool message."
+        desc = "Read the contents of the file at `path`."
         if self.has_mmproj:
             desc += " The file can be text or an image."
         return ToolDef(
