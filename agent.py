@@ -577,6 +577,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
     def run(self) -> None:
         loop_prompt = ""
         loop_until = "done"
+        loop_errors = 0
         last_output = ""
         start = 0.0
 
@@ -604,6 +605,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     self.console.bright("Loop completed.").reset()
                     loop_prompt = ""
                     last_output = ""
+                    loop_errors = 0
 
             if loop_prompt:
                 self.console.output(inp).sep()
@@ -683,8 +685,12 @@ The summary should be suitable to include as a system message by itself, e.g. by
                         squeeze_session()
                     else:
                         self.console.bright("Completion interrupted").reset()
+                    loop_errors += 1
 
             self.console.sep()
+
+            if loop_errors > 5:
+                raise AgentError("Too many errors encountered in /loop")
 
 
 class ToolAgent(Agent):
