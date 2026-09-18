@@ -546,10 +546,15 @@ The summary should be suitable to include as a system message by itself, e.g. by
     Agent: Wikipedia lists Mexico City as the largest by population.
 """
 
+        role = "system"
+        if "qwen3" in self.model_name.lower():
+            # Qwen3.5+ chat template doesn't like extra system messages
+            role = "user"
+
         msg_items = (
             [MsgItem(role="system", content=self.system_message)]
             + self.message_history
-            + [MsgItem(role="system", content=s_msg)]
+            + [MsgItem(role=role, content=s_msg)]
         )
 
         data = CompletionRequest(
@@ -583,7 +588,13 @@ The summary should be suitable to include as a system message by itself, e.g. by
             saved_messages.append(self.message_history.pop())
             saved_messages.reverse()
             summary = self.summarize_session()
-            self.message_history = [MsgItem(role="system", content=summary)] + saved_messages
+
+            role = "system"
+            if "qwen3" in self.model_name.lower():
+                # Qwen3.5+ chat template doesn't like extra system messages
+                role = "assistant"
+            self.message_history = [MsgItem(role=role, content=summary)] + saved_messages
+
             self.console.bright("Squeezed session down.").reset()
 
         while True:
