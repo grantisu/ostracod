@@ -566,6 +566,20 @@ The summary should be suitable to include as a system message by itself, e.g. by
         loop_until = "done"
         last_output = ""
         start = 0.0
+
+        def squeeze_session():
+            # Save last interaction to smooth the transition
+            saved_messages = []
+            while self.message_history and self.message_history[-1].role != "user":
+                saved_messages.append(self.message_history.pop())
+            saved_messages.append(self.message_history.pop())
+            saved_messages.reverse()
+            summary = self.summarize_session()
+            self.message_history = [
+                MsgItem(role="system", content=summary)
+            ] + saved_messages
+            self.console.bright("Squeezed session down.").reset()
+
         while True:
             if loop_prompt:
                 inp = loop_prompt
@@ -608,17 +622,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     self.message_history = self.message_history[:-n]
                     self.console.output(f"Cleared {orig_len - len(self.message_history)} messages")
                 elif cmd == "/squeeze"[: len(cmd)]:
-                    # Save last interaction to smooth the transition
-                    saved_messages = []
-                    while self.message_history and self.message_history[-1].role != "user":
-                        saved_messages.append(self.message_history.pop())
-                    saved_messages.append(self.message_history.pop())
-                    saved_messages.reverse()
-                    summary = self.summarize_session()
-                    self.message_history = [
-                        MsgItem(role="system", content=summary)
-                    ] + saved_messages
-                    self.console.bright("Squeezed session down.").reset()
+                    squeeze_session()
                 elif cmd == "/temperature"[: len(cmd)]:
                     try:
                         self.temperature = float(args[0])
