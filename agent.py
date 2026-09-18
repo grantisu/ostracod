@@ -27,6 +27,10 @@ class AgentError(Exception):
     """Something went wrong with running the agent"""
 
 
+class OutOfContextError(AgentError):
+    """Ran out of context"""
+
+
 class ModelT(BaseModel):
     """Ensure type member is always set"""
 
@@ -62,6 +66,7 @@ class ToolProp(ModelT):
 
 
 class FinishReason(str, Enum):
+    length = "length"
     stop = "stop"
     tool_calls = "tool_calls"
 
@@ -252,6 +257,9 @@ class Client:
 
             finish_reason = co.get("finish_reason")
             d = co["delta"]
+
+            if finish_reason == "length":
+                raise OutOfContextError("Ran out of context while generating reply")
 
             if "role" in d:
                 role = MsgRole(d["role"])
@@ -575,9 +583,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
             saved_messages.append(self.message_history.pop())
             saved_messages.reverse()
             summary = self.summarize_session()
-            self.message_history = [
-                MsgItem(role="system", content=summary)
-            ] + saved_messages
+            self.message_history = [MsgItem(role="system", content=summary)] + saved_messages
             self.console.bright("Squeezed session down.").reset()
 
         while True:
@@ -656,25 +662,16 @@ The summary should be suitable to include as a system message by itself, e.g. by
                 self.console.output(str(r["stderr"]))
                 self.console.output(str(r["stdout"]))
             else:
-                # If we're in a loop, retry things a few times before giving up
-                for i in range(3):
-                    try:
-                        last_output = self.streaming_completion(inp)
-                    except KeyboardInterrupt:
-                        loop_prompt = ""
-                        self.console.bright("Interrupted").reset()
-                        break
-                    except AgentError as e:
-                        if str(e).startswith("Bad Request"):
-                            self.console.bright("Removing history up to last user request").reset()
-                            while msg := self.message_history.pop():
-                                if msg.role == "user":
-                                    break
-                            break
-                        elif not loop_prompt:
-                            raise
+                try:
+                    last_output = self.streaming_completion(inp)
+                except KeyboardInterrupt:
+                    loop_prompt = ""
+                    self.console.bright("Interrupted").reset()
+                except AgentError as e:
+                    if loop_prompt and isinstance(e, OutOfContextError):
+                        squeeze_session()
                     else:
-                        break
+                        self.console.bright("Completion interrupted").reset()
 
             self.console.sep()
 
@@ -805,25 +802,15 @@ class ToolAgent(Agent):
                 data.tool_choice = ToolChoice("auto")
 
             last_error = None
-            for retry in range(3):
-                if retry > 0:
-                    self.console.bright("RETRYING").reset()
-                try:
-                    completion = self.client.streaming_completion(data)
-                    for frag in completion:
-                        self.console.emit_fragment(*frag)
-                except AgentError as e:
-                    self.console.bright(f"FAILED COMPLETION:\n{e}").reset()
-                    last_error = e
-                    if str(e).startswith("Bad Request"):
-                        break
-                else:
-                    last_error = None
-                    break
-            self.console.sep()
-
-            if last_error is not None:
-                raise last_error
+            try:
+                completion = self.client.streaming_completion(data)
+                for frag in completion:
+                    self.console.emit_fragment(*frag)
+            except AgentError as e:
+                self.console.bright(f"FAILED COMPLETION:\n{e}").reset()
+                raise
+            finally:
+                self.console.sep()
 
             assert completion.response is not None
             resp = completion.response.choices[0]
