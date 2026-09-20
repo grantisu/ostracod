@@ -1095,7 +1095,8 @@ class ToolAgent(Agent):
             meta=ToolFunc(
                 name="write",
                 description="Write `content` into the file at `path`, "
-                "replacing anything that was already there.",
+                "replacing anything that was already there.\n"
+                "Note: this tool will not create missing parent directories.",
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to write."),
