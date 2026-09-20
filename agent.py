@@ -796,7 +796,13 @@ class ToolAgent(Agent):
 
     def call_tool(self, t: ToolCallItem) -> Any:
         kwargs = t.function.args_as_kwargs()
-        return self.tools[t.function.name].func(self, **kwargs)
+        try:
+            return self.tools[t.function.name].func(self, **kwargs)
+        except TypeError as e:
+            m = re.search(r"missing .*", str(e))
+            if m:
+                return {"error": m.group(0)}
+            raise
 
     def streaming_completion(self, user_content: str | None, max_rounds: int = 250) -> str:
         if user_content is not None:
