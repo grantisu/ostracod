@@ -704,7 +704,7 @@ class ToolAgent(Agent):
         enable_thinking: bool = True,
         system_message: str | None = None,
         temperature: float | None = None,
-        tools: Iterable[ToolDef] | None = None,
+        tools: Iterable[ToolDef] | str | None = None,
         working_dir: Path | str = "./workingdir",
         webcache_dir: Path | str = "/tmp/webcache",
         user_agent: str = "ostracod/0.0",
@@ -728,7 +728,16 @@ class ToolAgent(Agent):
         if tools is None:
             tools = self.default_tools
 
-        self.tools = {t.meta.name: t for t in tools}
+        self.tools = {}
+        for t in tools:
+            if isinstance(t, str):
+                n = t
+                d = next(u for u in self.default_tools if u.meta.name == t)
+            else:
+                n = t.meta.name
+                d = t
+            self.tools[n] = d
+
         # TODO: figure out better abstraction?
         self.message_queue: list[MsgItem] = []
 
