@@ -1,4 +1,5 @@
 import atexit
+import glob
 import io
 import json
 import mimetypes
@@ -794,6 +795,7 @@ class ToolAgent(Agent):
     @property
     def default_tools(self) -> list[ToolDef]:
         return [
+            self.glob_tool,
             self.read_tool,
             self.write_tool,
             self.edit_line_tool,
@@ -1008,6 +1010,47 @@ class ToolAgent(Agent):
                         ),
                     },
                     required=["url"],
+                ),
+            ),
+        )
+
+    def run_glob_tool(
+        self, pattern: str, include_hidden=False
+    ) -> dict[str, str | int | None] | MsgContent:
+        rpath = (self.current_dir / pattern).resolve()
+        try:
+            rpath.relative_to(self.working_dir)
+        except ValueError:
+            self.console.bright("WARNING: globbing outside of working directory!")
+
+        return {"matches": glob.glob(pattern, include_hidden=include_hidden, recursive=True)}
+
+    @property
+    def glob_tool(self) -> ToolDef:
+        desc = "List files matching a pattern relative to the current directory."
+        return ToolDef(
+            func=self.__class__.run_glob_tool,
+            meta=ToolFunc(
+                name="glob",
+                description=desc,
+                parameters=ToolParams(
+                    properties={
+                        "pattern": ToolProp(
+                            "string",
+                            "The pattern to match.\n"
+                            "`*`: match zero or more non-`/` characters.\n"
+                            "`?`: match a single character.\n"
+                            "`[`: begin a character range, e.g. `[a-z]`. "
+                            "Can also be used to match metacharacters, e.g. `[?]`.\n"
+                            "`**`: like `*` but also matches `/`, i.e. traverse subdirectories.\n"
+                            "All other characters will match themselves.",
+                        ),
+                        "include_hidden": ToolProp(
+                            "boolean",
+                            "Whether to include hidden files in matches.\nDefault: false",
+                        ),
+                    },
+                    required=["pattern"],
                 ),
             ),
         )
