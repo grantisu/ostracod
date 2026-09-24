@@ -959,11 +959,11 @@ class ToolAgent(Agent):
             f" -P '{self.webcache_dir}' --restrict-file-names=windows -Nkx '{url}' 2>&1"
             f" | grep -o '{self.webcache_dir}[^’]*' | head -1"
         )
-        file = Path(
+        file = str(
             self.subshell_helper(["/bin/sh", "-c", wget_command], cwd=self.current_dir).get(
                 "stdout", "MISSING FILE NAME\n"
-            )[:-1]
-        )
+            )
+        )[:-1]
 
         command = ["cat", file]
         if not return_html:
@@ -1014,9 +1014,7 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_glob_tool(
-        self, pattern: str, include_hidden=False
-    ) -> dict[str, str | int | None] | MsgContent:
+    def run_glob_tool(self, pattern: str, include_hidden=False) -> dict[str, list[str]]:
         rpath = (self.current_dir / pattern).resolve()
         try:
             rpath.relative_to(self.working_dir)
@@ -1476,6 +1474,7 @@ class ToolAgent(Agent):
                 error = f"Unknown action: {action}"
 
         if error is None:
+            assert lines is not None, "Failed to read lines without setting error"
             try:
                 with rpath.open("w") as fh:
                     bytes_written = fh.write("\n".join(lines))
