@@ -509,7 +509,7 @@ class Agent:
             env = {**os.environ.copy(), **env}
         try:
             r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd, env=env)
-        except subprocess.TimeoutExpired as e:
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
             return {
                 "returncode": 1,
                 "stdout": "",
