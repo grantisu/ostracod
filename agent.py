@@ -501,14 +501,27 @@ class Agent:
     def subshell_helper(
         self,
         argv: list[str],
+        stdin: str = "",
         timeout: int = 30,
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, str | int | None]:
         if env:
             env = {**os.environ.copy(), **env}
+
+        subprocess_kwargs = {
+            "capture_output": True,
+            "timeout": timeout,
+            "cwd": cwd,
+            "env": env,
+        }
+        if isinstance(stdin, io.IOBase):
+            subprocess_kwargs["stdin"] = stdin
+        else:
+            subprocess_kwargs["input"] = stdin.encode()
+
         try:
-            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd, env=env)
+            r = subprocess.run(argv, **subprocess_kwargs)
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
             return {
                 "returncode": 1,
@@ -887,7 +900,9 @@ class ToolAgent(Agent):
         max_output: int = 16384,
         return_json: bool = False,
     ) -> dict[str, str | int | bool | None] | MsgContent:
-        result = self.subshell_helper(["/bin/sh", "-c", command], cwd=self.current_dir, env=env)
+        result = self.subshell_helper(
+            ["/bin/sh", "-c", command], stdin=stdin, cwd=self.current_dir, env=env
+        )
 
         for s in ("stdout", "stderr"):
             r = str(result.get(s, ""))
