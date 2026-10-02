@@ -1505,6 +1505,12 @@ class ToolAgent(Agent):
                     "bytes_written": 0,
                 }
 
+        if '\n' in (old_content or ''):
+            return {
+                "error": "Attempting to match multiple lines",
+                "bytes_written": 0,
+            }
+
         lines: list[str]
         error = None
         bytes_written = 0
