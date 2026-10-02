@@ -1471,7 +1471,12 @@ class ToolAgent(Agent):
         )
 
     def run_edit_line_tool(
-        self, path: str, line_no: int, action: str, content: str
+        self,
+        path: str,
+        line_no: int,
+        action: str,
+        old_content: str | None = None,
+        new_content: str | None = None,
     ) -> dict[str, str | int | None]:
         rpath = (self.current_dir / path).resolve()
         try:
@@ -1482,7 +1487,25 @@ class ToolAgent(Agent):
                 "bytes_written": 0,
             }
 
-        lines = None
+        if action == "delete":
+            if new_content is not None:
+                return {
+                    "error": "new_content not allowed for delete",
+                    "bytes_written": 0,
+                }
+            if old_content is None:
+                return {
+                    "error": "old_content required for delete",
+                    "bytes_written": 0,
+                }
+        else:
+            if new_content is None:
+                return {
+                    "error": "new_content required",
+                    "bytes_written": 0,
+                }
+
+        lines: list[str]
         error = None
         bytes_written = 0
         try:
@@ -1493,21 +1516,33 @@ class ToolAgent(Agent):
         else:
             lines = inp.split("\n")
 
+        if error is None and old_content is not None:
+            if line_no > 0:
+                line_no -= 1
+            try:
+                while lines[line_no] != old_content:
+                    line_no += 1
+            except IndexError:
+                error = "No matching line found"
+            line_no += 1
+
         # TODO: be more strict?
-        if lines is not None:
+        if error is None:
             if action == "add":
-                lines.insert(line_no, content)
+                lines.insert(line_no, new_content)
             elif action == "delete":
                 try:
                     l = lines.pop(line_no - 1)
                 except IndexError:
                     error = "`line_no` out of range"
                 else:
-                    if l != content:
-                        error = f"Line content mismatch; original content: {l}"
+                    assert l == old_content, "Deleted wrong line"
             elif action == "replace":
+                assert new_content is not None, "Missing new_content in replace"
+                if old_content is not None:
+                    assert lines[line_no - 1] == old_content, "Replaced wrong line"
                 try:
-                    lines[line_no - 1] = content
+                    lines[line_no - 1] = new_content
                 except IndexError:
                     error = "`line_no` out of range"
             else:
@@ -1532,35 +1567,44 @@ class ToolAgent(Agent):
             func=self.__class__.run_edit_line_tool,
             meta=ToolFunc(
                 name="edit_line",
-                description="Add, delete, or replace the line at `line_no` in the file at `path`.",
+                description="Add, delete, or replace a single line in the file at `path`.",
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to write."),
                         "line_no": ToolProp(
                             "integer",
                             (
-                                "Line to operate on. Line indexes start at 1. "
+                                "Line index to operate on. Line indexes start at 1. "
                                 "When adding a line, the line is added after the given index; "
-                                "a line can be added before the first line by setting `line_no` to 0."
+                                "a line can be added before the first line by setting `line_no` to 0. "
                             ),
                         ),
                         "action": ToolProp(
                             "string",
                             (
-                                "Which action to perfom. "
+                                "Which action to perform. "
                                 'Must be one of "add", "delete", or "replace".'
                             ),
                         ),
-                        "content": ToolProp(
+                        "old_content": ToolProp(
                             "string",
                             (
-                                'The content of the line. If the action is "delete", '
-                                "then this must match the original line. For other actions, "
-                                "this will be the new content at that line."
+                                "Original text of the location to edit. "
+                                "If the line at `line_no` doesn't match this, "
+                                "subsequent lines will be searched until the first match is found. "
+                                'Required argument for "delete" action.'
+                            ),
+                        ),
+                        "new_content": ToolProp(
+                            "string",
+                            (
+                                "New text to put at the found location. "
+                                'Required argument for "add" and "replace"; '
+                                'invalid argument for "delete".'
                             ),
                         ),
                     },
-                    required=["path", "line_no", "action", "content"],
+                    required=["path", "line_no", "action"],
                 ),
             ),
         )
