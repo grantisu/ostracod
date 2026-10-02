@@ -7,6 +7,7 @@ import os
 import re
 import readline
 import requests
+import signal
 import subprocess
 import sys
 import time
@@ -517,6 +518,7 @@ class Agent:
             "stderr": subprocess.PIPE,
             "text": True,
             "errors": "replace",
+            "preexec_fn": os.setsid,  # Create processgroup
         }
 
         cmd_out = None
@@ -529,8 +531,10 @@ class Agent:
                 p.terminate()
                 cmd_out, cmd_err = p.communicate(timeout=1)
         except subprocess.TimeoutExpired:
-            p.kill()
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
             cmd_out, cmd_err = p.communicate()
+            if p.returncode != 0:
+                cmd_err += "\n[COMMAND TIMED OUT]\n"
 
         return {
             "returncode": p.returncode,
@@ -688,9 +692,9 @@ The summary should be suitable to include as a system message by itself, e.g. by
                 else:
                     self.console.output(f"Unknown command: {cmd}")
             elif inp[:1] == "%":
-                r = self.subshell_helper(["/bin/sh", "-c", inp[1:]])
-                self.console.output(str(r["stderr"]))
+                r = self.subshell_helper(["/bin/sh", "-c", inp[1:]], timeout=None)
                 self.console.output(str(r["stdout"]))
+                self.console.bright(str(r["stderr"])).reset()
             else:
                 try:
                     last_output = self.streaming_completion(inp)
