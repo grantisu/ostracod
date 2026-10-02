@@ -510,29 +510,32 @@ class Agent:
             env = {**os.environ.copy(), **env}
 
         subprocess_kwargs = {
-            "capture_output": True,
-            "timeout": timeout,
             "cwd": cwd,
             "env": env,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "errors": "replace",
         }
-        if isinstance(stdin, io.IOBase):
-            subprocess_kwargs["stdin"] = stdin
-        else:
-            subprocess_kwargs["input"] = stdin.encode()
 
+        cmd_out = None
+        cmd_err = None
+        p = subprocess.Popen(argv, **subprocess_kwargs)
         try:
-            r = subprocess.run(argv, **subprocess_kwargs)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
-            return {
-                "returncode": 1,
-                "stdout": "",
-                "stderr": str(e),
-            }
+            try:
+                cmd_out, cmd_err = p.communicate(input=stdin, timeout=timeout)
+            except KeyboardInterrupt:
+                p.terminate()
+                cmd_out, cmd_err = p.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            cmd_out, cmd_err = p.communicate()
 
         return {
-            "returncode": r.returncode,
-            "stdout": r.stdout.decode(errors="replace"),
-            "stderr": r.stderr.decode(errors="replace"),
+            "returncode": p.returncode,
+            "stdout": cmd_out,
+            "stderr": cmd_err,
         }
 
     def summarize_session(self) -> str:
