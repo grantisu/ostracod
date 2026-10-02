@@ -1478,42 +1478,31 @@ class ToolAgent(Agent):
         old_content: str | None = None,
         new_content: str | None = None,
     ) -> dict[str, str | int | None]:
+        lines: list[str]
+        error = None
+        bytes_written = 0
+        num_to_replace = 0
         rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
         except ValueError:
-            return {
-                "error": "Path not in working directory",
-                "bytes_written": 0,
-            }
+            error = "Path not in working directory"
 
         if action == "delete":
             if new_content is not None:
-                return {
-                    "error": "new_content not allowed for delete",
-                    "bytes_written": 0,
-                }
+                error = "new_content not allowed for delete"
             if old_content is None:
-                return {
-                    "error": "old_content required for delete",
-                    "bytes_written": 0,
-                }
+                error = "old_content required for delete"
         else:
             if new_content is None:
-                return {
-                    "error": "new_content required",
-                    "bytes_written": 0,
-                }
+                error = "new_content required"
+        if action == "replace":
+            if old_content is None:
+                error = "old_content required for replace"
 
-        if '\n' in (old_content or ''):
-            return {
-                "error": "Attempting to match multiple lines",
-                "bytes_written": 0,
-            }
+        if error:
+            return {"error": error, "bytes_written": bytes_written}
 
-        lines: list[str]
-        error = None
-        bytes_written = 0
         try:
             with rpath.open("r") as fh:
                 inp = fh.read()
@@ -1525,34 +1514,26 @@ class ToolAgent(Agent):
         if error is None and old_content is not None:
             if line_no > 0:
                 line_no -= 1
-            try:
-                while lines[line_no] != old_content:
-                    line_no += 1
-            except IndexError:
+            old_lines = old_content.split('\n')
+            while line_no < len(lines):
+                if lines[line_no:line_no + len(old_lines)] == old_lines:
+                    break
+                line_no += 1
+
+            if line_no >= len(lines):
                 error = "No matching line found"
-            line_no += 1
+
+            if action == "add":
+                line_no += 1
+            else:
+                num_to_replace = len(old_lines)
 
         # TODO: be more strict?
         if error is None:
-            if action == "add":
-                lines.insert(line_no, new_content)
-            elif action == "delete":
-                try:
-                    l = lines.pop(line_no - 1)
-                except IndexError:
-                    error = "`line_no` out of range"
-                else:
-                    assert l == old_content, "Deleted wrong line"
-            elif action == "replace":
-                assert new_content is not None, "Missing new_content in replace"
-                if old_content is not None:
-                    assert lines[line_no - 1] == old_content, "Replaced wrong line"
-                try:
-                    lines[line_no - 1] = new_content
-                except IndexError:
-                    error = "`line_no` out of range"
+            if new_content is not None:
+                lines[line_no : line_no + num_to_replace] = [new_content]
             else:
-                error = f"Unknown action: {action}"
+                del lines[line_no : line_no + num_to_replace]
 
         if error is None:
             assert lines is not None, "Failed to read lines without setting error"
@@ -1576,13 +1557,14 @@ class ToolAgent(Agent):
                 description="Add, delete, or replace a single line in the file at `path`.",
                 parameters=ToolParams(
                     properties={
-                        "path": ToolProp("string", "The file to write."),
+                        "path": ToolProp("string", "The file to edit."),
                         "line_no": ToolProp(
                             "integer",
                             (
                                 "Line index to operate on. Line indexes start at 1. "
                                 "When adding a line, the line is added after the given index; "
                                 "a line can be added before the first line by setting `line_no` to 0. "
+                                "With `old_content`, `line_no` is where the search for a match will start."
                             ),
                         ),
                         "action": ToolProp(
@@ -1595,10 +1577,10 @@ class ToolAgent(Agent):
                         "old_content": ToolProp(
                             "string",
                             (
-                                "Original text of the location to edit. "
+                                "Original text to edit. "
                                 "If the line at `line_no` doesn't match this, "
                                 "subsequent lines will be searched until the first match is found. "
-                                'Required argument for "delete" action.'
+                                'Required argument for "replace" and "delete" actions; optional for "add".'
                             ),
                         ),
                         "new_content": ToolProp(
