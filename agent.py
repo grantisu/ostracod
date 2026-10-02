@@ -1082,7 +1082,9 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_read_tool(self, path: str) -> dict[str, str | int | None] | MsgContent:
+    def run_read_tool(
+        self, path: str, number_lines=False
+    ) -> dict[str, str | int | None] | MsgContent:
         rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
@@ -1095,7 +1097,13 @@ class ToolAgent(Agent):
         content: MsgContent
         try:
             with rpath.open("rb") as fh:
-                fdata = fh.read()
+                if not number_lines:
+                    fdata = fh.read()
+                else:
+                    fdata = b"".join(
+                        b"%6d %s" % (n + 1, line) for n, line in enumerate(fh.readlines())
+                    )
+
         except (IOError, ValueError) as e:
             error = f"Error reading {path!r}: {e}"
 
@@ -1137,13 +1145,16 @@ class ToolAgent(Agent):
         if self.has_mmproj:
             desc += " The file can be text or an image."
         return ToolDef(
-            func=lambda s, path: self.__class__.run_read_tool(s, path),
+            func=self.__class__.run_read_tool,
             meta=ToolFunc(
                 name="read",
                 description=desc,
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to read."),
+                        "number_lines": ToolProp(
+                            "boolean", "Whether to number each line.\nDefault: false"
+                        ),
                     },
                     required=["path"],
                 ),
