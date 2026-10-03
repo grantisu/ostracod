@@ -241,7 +241,11 @@ class Client:
                     continue
                 elif line == b"data: [DONE]":
                     return
-                yield json.loads(line[6:])
+                elif line[:6] == b"data: ":
+                    yield json.loads(line[6:])
+                else:
+                    # TODO: handle malformed line somehow?
+                    pass
 
             raise AgentError("Missing DONE line")
 
