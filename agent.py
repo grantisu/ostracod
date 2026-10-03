@@ -1479,8 +1479,9 @@ class ToolAgent(Agent):
         path: str,
         line_no: int,
         action: str,
-        old_content: str | None = None,
+        old_content: str,
         new_content: str | None = None,
+        allow_empty: bool = False,
     ) -> dict[str, str | int | None]:
         lines: list[str]
         error = None
@@ -1495,14 +1496,15 @@ class ToolAgent(Agent):
         if action == "delete":
             if new_content is not None:
                 error = "new_content not allowed for delete"
-            if old_content is None:
-                error = "old_content required for delete"
         else:
             if new_content is None:
                 error = "new_content required"
-        if action == "replace":
-            if old_content is None:
-                error = "old_content required for replace"
+        if line_no == 0:
+            if action != "add":
+                error = '`line_no` can only be zero when `action` is "add"'
+        else:
+            if old_content == "" and not allow_empty:
+                error = "Empty `old_content` not allowed without `allow_empty`"
 
         if error:
             return {"error": error, "bytes_written": bytes_written}
@@ -1515,12 +1517,12 @@ class ToolAgent(Agent):
         else:
             lines = inp.split("\n")
 
-        if error is None and old_content is not None:
+        if error is None and line_no > 0:
             if line_no > 0:
                 line_no -= 1
-            old_lines = old_content.split('\n')
+            old_lines = old_content.split("\n")
             while line_no < len(lines):
-                if lines[line_no:line_no + len(old_lines)] == old_lines:
+                if lines[line_no : line_no + len(old_lines)] == old_lines:
                     break
                 line_no += 1
 
@@ -1558,17 +1560,17 @@ class ToolAgent(Agent):
             func=self.__class__.run_edit_line_tool,
             meta=ToolFunc(
                 name="edit_line",
-                description="Add, delete, or replace a single line in the file at `path`.",
+                description="Add, delete, or replace matching lines in the file at `path`.",
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to edit."),
                         "line_no": ToolProp(
                             "integer",
                             (
-                                "Line index to operate on. Line indexes start at 1. "
-                                "When adding a line, the line is added after the given index; "
-                                "a line can be added before the first line by setting `line_no` to 0. "
-                                "With `old_content`, `line_no` is where the search for a match will start."
+                                "Line number to start search on. Lines are 1-indexed. "
+                                "When adding a line, the line is added after the matched index; "
+                                "a line can be added at the start of the file by setting `line_no` to 0, "
+                                "in which case no search will be performed."
                             ),
                         ),
                         "action": ToolProp(
@@ -1581,10 +1583,10 @@ class ToolAgent(Agent):
                         "old_content": ToolProp(
                             "string",
                             (
-                                "Original text to edit. "
+                                "Text to match when performing `action`. "
                                 "If the line at `line_no` doesn't match this, "
                                 "subsequent lines will be searched until the first match is found. "
-                                'Required argument for "replace" and "delete" actions; optional for "add".'
+                                "When `line_no` is 0, `old_content` is ignored."
                             ),
                         ),
                         "new_content": ToolProp(
@@ -1595,8 +1597,16 @@ class ToolAgent(Agent):
                                 'invalid argument for "delete".'
                             ),
                         ),
+                        "allow_empty": ToolProp(
+                            "boolean",
+                            (
+                                "Whether to allow `old_content` to be an empty string, "
+                                "i.e. match empty lines.\n"
+                                "Default: false"
+                            ),
+                        ),
                     },
-                    required=["path", "line_no", "action"],
+                    required=["path", "line_no", "action", "old_content"],
                 ),
             ),
         )
