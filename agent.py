@@ -1052,7 +1052,9 @@ class ToolAgent(Agent):
         except ValueError:
             self.console.bright("WARNING: globbing outside of working directory!")
 
-        matches = glob.glob(pattern, include_hidden=include_hidden, recursive=True)
+        matches = glob.glob(
+            pattern, root_dir=self.current_dir, include_hidden=include_hidden, recursive=True
+        )
         if len(matches) > 500:
             return {
                 "error": "Too many matches found; use a more selective pattern.",
