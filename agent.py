@@ -696,7 +696,12 @@ The summary should be suitable to include as a system message by itself, e.g. by
                 else:
                     self.console.output(f"Unknown command: {cmd}")
             elif inp[:1] == "%":
-                r = self.subshell_helper(["/bin/sh", "-c", inp[1:]], timeout=None)
+                inp = inp[1:]
+                kwargs = {"timeout": None}
+                if inp[:1] == "@":
+                    inp = inp[1:]
+                    kwargs["cwd"] = self.current_dir
+                r = self.subshell_helper(["/bin/sh", "-c", inp], **kwargs)
                 self.console.output(str(r["stdout"]))
                 self.console.bright(str(r["stderr"])).reset()
             else:
