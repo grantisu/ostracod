@@ -849,11 +849,11 @@ class ToolAgent(Agent):
     def default_tools(self) -> list[ToolDef]:
         return [
             self.glob_tool,
-            self.read_lines_tool,
-            self.write_tool,
-            self.edit_lines_tool,
             self.changedir_tool,
-            self.patch_tool,
+            self.read_lines_tool,
+            self.edit_lines_tool,
+            self.write_tool,
+            # self.patch_tool,
             self.shell_tool,
             self.web_tool,
         ]
