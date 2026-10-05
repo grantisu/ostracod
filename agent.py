@@ -779,6 +779,8 @@ class ToolAgent(Agent):
 
         if tools is None:
             tools = self.default_tools
+            if self.has_mmproj:
+                tools += [self.read_image_tool]
 
         self.tools = {}
         for t in tools:
@@ -848,7 +850,6 @@ class ToolAgent(Agent):
         return [
             self.glob_tool,
             self.read_lines_tool,
-            self.read_tool,
             self.write_tool,
             self.edit_lines_tool,
             self.changedir_tool,
@@ -1183,9 +1184,10 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_read_tool(
-        self, path: str, number_lines=False
-    ) -> dict[str, str | int | None] | MsgContent:
+    def run_read_image_tool(self, path: str) -> dict[str, str | int | None] | MsgContent:
+        if not self.has_mmproj:
+            return {"error": "read_image not available: no mmproj found"}
+
         rpath = (self.current_dir / path).resolve()
         try:
             rpath.relative_to(self.working_dir)
@@ -1196,39 +1198,31 @@ class ToolAgent(Agent):
         error = None
         status = "No file data read."
         content: MsgContent
-        try:
-            with rpath.open("rb") as fh:
-                if not number_lines:
-                    fdata = fh.read()
-                else:
-                    fdata = b"".join(
-                        b"%6d %s" % (n + 1, line) for n, line in enumerate(fh.readlines())
-                    )
 
-        except (IOError, ValueError) as e:
-            error = f"Error reading {path!r}: {e}"
-
+        if t not in ("image/jpeg", "image/png", "image/gif"):
+            error = f"Unsupported file type: {t}"
         else:
-            status = "File data read successfully."
-
             try:
-                if t in ("image/jpeg", "image/png", "image/gif") and self.has_mmproj:
-                    if t == "image/jpeg":
-                        # Fix orientation
-                        with Image.open(rpath) as im:
-                            buf = io.BytesIO()
-                            ImageOps.exif_transpose(im, in_place=True)
-                            im.save(buf, format="JPEG", quality=90)
-                            fdata = buf.getvalue()
-                    content = MsgContent(
-                        type="image_url",
-                        image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
-                    )
-                else:
-                    content = MsgContent(type="text", text=fdata.decode(errors="replace"))
-                    if len(str(content.text)) > 65536:
-                        error = f"File too big: {len(str(content.text))} chars"
-                        status = f"File read but not sent."
+                with rpath.open("rb") as fh:
+                    fdata = fh.read()
+            except (IOError, ValueError) as e:
+                error = f"Error reading {path!r}: {e}"
+            else:
+                status = "File data read successfully."
+
+        if error is None:
+            try:
+                if t == "image/jpeg":
+                    # Fix orientation
+                    with Image.open(rpath) as im:
+                        buf = io.BytesIO()
+                        ImageOps.exif_transpose(im, in_place=True)
+                        im.save(buf, format="JPEG", quality=90)
+                        fdata = buf.getvalue()
+                content = MsgContent(
+                    type="image_url",
+                    image_url=Url(url=f"data:{t};base64,{b64encode(fdata).decode()}"),
+                )
             except (IOError, ValueError) as e:
                 error = f"Error processing data in {path!r}: {e}"
 
@@ -1241,21 +1235,16 @@ class ToolAgent(Agent):
             return content
 
     @property
-    def read_tool(self) -> ToolDef:
-        desc = "Read the contents of the file at `path`."
-        if self.has_mmproj:
-            desc += " The file can be text or an image."
+    def read_image_tool(self) -> ToolDef:
+        desc = "Read the image at `path`."
         return ToolDef(
-            func=self.__class__.run_read_tool,
+            func=self.__class__.run_read_image_tool,
             meta=ToolFunc(
-                name="read",
+                name="read_image",
                 description=desc,
                 parameters=ToolParams(
                     properties={
-                        "path": ToolProp("string", "The file to read."),
-                        "number_lines": ToolProp(
-                            "boolean", "Whether to number each line.\nDefault: false"
-                        ),
+                        "path": ToolProp("string", "The image to read."),
                     },
                     required=["path"],
                 ),
