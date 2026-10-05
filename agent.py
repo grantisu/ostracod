@@ -847,6 +847,7 @@ class ToolAgent(Agent):
     def default_tools(self) -> list[ToolDef]:
         return [
             self.glob_tool,
+            self.read_lines_tool,
             self.read_tool,
             self.write_tool,
             self.edit_lines_tool,
@@ -1111,6 +1112,73 @@ class ToolAgent(Agent):
                         ),
                     },
                     required=["pattern"],
+                ),
+            ),
+        )
+
+    def run_read_lines_tool(
+        self,
+        path: str,
+        number_lines=False,
+        offset: int = 0,
+        limit: int = 65536,
+    ) -> dict[str, str | int | None] | MsgContent:
+        rpath = (self.current_dir / path).resolve()
+        try:
+            rpath.relative_to(self.working_dir)
+        except ValueError:
+            self.console.bright("WARNING: reading file outside of working directory!")
+
+        error = None
+        status = "No file data read."
+        content: MsgContent
+        try:
+            with rpath.open("r", errors="replace") as fh:
+                lines = fh.readlines()[offset : offset + limit]
+        except (IOError, ValueError) as e:
+            error = f"Error reading {path!r}: {e}"
+        else:
+            status = "File lines read successfully."
+
+            if number_lines:
+                lines = [f"{n + offset + 1:6d} {line}" for n, line in enumerate(lines)]
+
+            content = MsgContent(type="text", text="\n".join(lines))
+
+            if len(content.text) > 65536:
+                error = f"Result too big to send: {len(content.text)} chars"
+                status = f"File read but not sent."
+
+        if error:
+            return {
+                "error": error,
+                "status": status,
+            }
+        else:
+            return content
+
+    @property
+    def read_lines_tool(self) -> ToolDef:
+        desc = "Read lines from file at `path`."
+        return ToolDef(
+            func=self.__class__.run_read_lines_tool,
+            meta=ToolFunc(
+                name="read_lines",
+                description=desc,
+                parameters=ToolParams(
+                    properties={
+                        "path": ToolProp("string", "The file to read."),
+                        "number_lines": ToolProp(
+                            "boolean", "Whether to number each line. Default: false"
+                        ),
+                        "offset": ToolProp(
+                            "integer", "Number of lines to skip from start of file. Default: 0"
+                        ),
+                        "limit": ToolProp(
+                            "integer", "Maximum number of lines to return. Default: 65536"
+                        ),
+                    },
+                    required=["path"],
                 ),
             ),
         )
