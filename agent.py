@@ -343,7 +343,7 @@ class Console:
         if self.color:
             atexit.register(self.reset)
 
-        if self.history_file is not None:
+        if self.stdin.isatty() and self.history_file is not None:
             if self.history_file.is_dir():
                 # TODO: fix this elsewhere
                 self.history_file /= "history"
@@ -1225,7 +1225,7 @@ class ToolAgent(Agent):
                 name="write",
                 description="Write `content` into the file at `path`, "
                 "replacing anything that was already there.\n"
-                "Note: this tool will not create missing parent directories.",
+                "Note: this tool is limited to the working directory and will not create missing parent directories.",
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to write."),
