@@ -849,7 +849,7 @@ class ToolAgent(Agent):
             self.glob_tool,
             self.read_tool,
             self.write_tool,
-            self.edit_line_tool,
+            self.edit_lines_tool,
             self.changedir_tool,
             self.patch_tool,
             self.shell_tool,
@@ -1503,7 +1503,7 @@ class ToolAgent(Agent):
             ),
         )
 
-    def run_edit_line_tool(
+    def run_edit_lines_tool(
         self,
         path: str,
         line_no: int,
@@ -1584,11 +1584,11 @@ class ToolAgent(Agent):
         }
 
     @property
-    def edit_line_tool(self) -> ToolDef:
+    def edit_lines_tool(self) -> ToolDef:
         return ToolDef(
-            func=self.__class__.run_edit_line_tool,
+            func=self.__class__.run_edit_lines_tool,
             meta=ToolFunc(
-                name="edit_line",
+                name="edit_lines",
                 description="Add, delete, or replace matching lines in the file at `path`.",
                 parameters=ToolParams(
                     properties={
@@ -1597,8 +1597,8 @@ class ToolAgent(Agent):
                             "integer",
                             (
                                 "Line number to start search on. Lines are 1-indexed. "
-                                "When adding a line, the line is added after the matched index; "
-                                "a line can be added at the start of the file by setting `line_no` to 0, "
+                                "When adding lines, the lines are added after the matched index; "
+                                "lines can be added at the start of the file by setting `line_no` to 0, "
                                 "in which case no search will be performed."
                             ),
                         ),
@@ -1612,8 +1612,8 @@ class ToolAgent(Agent):
                         "old_content": ToolProp(
                             "string",
                             (
-                                "Text to match when performing `action`. "
-                                "If the line at `line_no` doesn't match this, "
+                                "Lines to match when performing `action`. "
+                                "If the lines at `line_no` don't match this, "
                                 "subsequent lines will be searched until the first match is found. "
                                 "When `line_no` is 0, `old_content` is ignored."
                             ),
@@ -1621,7 +1621,7 @@ class ToolAgent(Agent):
                         "new_content": ToolProp(
                             "string",
                             (
-                                "New text to put at the found location. "
+                                'New lines to put at (for "replace") or after (for "add") the found location. '
                                 'Required argument for "add" and "replace"; '
                                 'invalid argument for "delete".'
                             ),
