@@ -603,6 +603,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
         loop_prompt = ""
         loop_until = "done"
         loop_errors = 0
+        loop_clear = False
         last_output = ""
         start = 0.0
 
@@ -634,6 +635,8 @@ The summary should be suitable to include as a system message by itself, e.g. by
 
             if loop_prompt:
                 self.console.output(inp).sep()
+                if loop_clear:
+                    self.message_history = []
             else:
                 if start > 0.0:
                     duration = timedelta(seconds=time.time() - start)
@@ -654,6 +657,7 @@ The summary should be suitable to include as a system message by itself, e.g. by
 /temperature T: set the temperature to T (should be 0.0 - 2.0, but those limits aren't enforced)
 /think O: set thinking on or off
 /loop PROMPT: send PROMPT in a loop until the model thinks it's done.
+/loopclear O: whether to clear history on each loop iteration.
 """)
                 elif cmd == "/messages"[: len(cmd)]:
                     for msg in self.message_history:
@@ -693,6 +697,21 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     self.console.bright("Entering loop").reset()
                     loop_prompt = inp[6:]
                     loop_prompt += '\nWhen the task is complete, say "done" as a single word in a single message with no other preface or formatting.'
+                elif cmd == "/loopclear"[: len(cmd)]:
+                    try:
+                        v = None
+                        if args[0].lower() in "on y yes enable t true 1".split():
+                            v = True
+                        if args[0].lower() in "off n no disable f false 0".split():
+                            v = False
+                    except (IndexError, ValueError):
+                        pass
+                    if v is not None:
+                        loop_clear = v
+                    else:
+                        self.console.bright(
+                            f"Bad loopclear arg: {args!r}\nCurrent state is: {loop_clear}"
+                        ).reset()
                 else:
                     self.console.output(f"Unknown command: {cmd}")
             elif inp[:1] == "%":
@@ -711,6 +730,9 @@ The summary should be suitable to include as a system message by itself, e.g. by
                     loop_prompt = ""
                     self.console.bright("Interrupted").reset()
                 except AgentError as e:
+                    if loop_clear:
+                        self.message_history = []
+                        continue
                     if loop_prompt and isinstance(e, OutOfContextError):
                         squeeze_session()
                     else:
