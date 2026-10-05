@@ -1657,7 +1657,10 @@ class ToolAgent(Agent):
             func=self.__class__.run_edit_lines_tool,
             meta=ToolFunc(
                 name="edit_lines",
-                description="Add, delete, or replace matching lines in the file at `path`.",
+                description=(
+                    "Add, delete, or replace matching lines in the file at `path`. "
+                    "Note: remember to track line number changes when making more than one edit."
+                ),
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to edit."),
