@@ -1120,9 +1120,9 @@ class ToolAgent(Agent):
     def run_read_lines_tool(
         self,
         path: str,
-        number_lines=False,
+        limit: int,
         offset: int = 0,
-        limit: int = 65536,
+        number_prefix=False,
     ) -> dict[str, str | int | None] | MsgContent:
         rpath = (self.current_dir / path).resolve()
         try:
@@ -1133,18 +1133,40 @@ class ToolAgent(Agent):
         error = None
         status = "No file data read."
         content: MsgContent
+
+        if limit > 1000:
+            error = f"`limit` over 1000: {limit}"
+        elif limit < 1:
+            error = f"`limit` too small: {limit}"
+        elif offset < 0:
+            error = "`offset` can't be negative"
+
+        if error:
+            return {"error": error, "status": status}
+
         try:
+            cur_limit, cur_offset = limit, offset
+            lines = []
             with rpath.open("r", errors="replace") as fh:
-                lines = fh.readlines()[offset : offset + limit]
+                while cur_offset >= 0 and cur_limit > 0:
+                    assert cur_offset >= 0
+                    assert cur_limit >= 0
+                    read_lines = fh.readlines(65536)
+                    if not read_lines:
+                        break
+                    kept_lines = read_lines[cur_offset:cur_offset + cur_limit]
+                    cur_limit -= len(kept_lines)
+                    cur_offset -= len(read_lines) - len(kept_lines)
+                    lines += kept_lines
         except (IOError, ValueError) as e:
             error = f"Error reading {path!r}: {e}"
         else:
             status = "File lines read successfully."
 
-            if number_lines:
-                lines = [f"{n + offset + 1:6d} {line}" for n, line in enumerate(lines)]
+            if number_prefix:
+                lines = [f"{n + offset + 1:6d}: {line}" for n, line in enumerate(lines)]
 
-            content = MsgContent(type="text", text="\n".join(lines))
+            content = MsgContent(type="text", text="".join(lines))
 
             if len(content.text) > 65536:
                 error = f"Result too big to send: {len(content.text)} chars"
@@ -1169,17 +1191,17 @@ class ToolAgent(Agent):
                 parameters=ToolParams(
                     properties={
                         "path": ToolProp("string", "The file to read."),
-                        "number_lines": ToolProp(
-                            "boolean", "Whether to number each line. Default: false"
+                        "limit": ToolProp(
+                            "integer", "Maximum number of lines to return."
                         ),
                         "offset": ToolProp(
                             "integer", "Number of lines to skip from start of file. Default: 0"
                         ),
-                        "limit": ToolProp(
-                            "integer", "Maximum number of lines to return. Default: 65536"
+                        "number_prefix": ToolProp(
+                            "boolean", "Whether to number each line. Default: false"
                         ),
                     },
-                    required=["path"],
+                    required=["path", "limit"],
                 ),
             ),
         )
